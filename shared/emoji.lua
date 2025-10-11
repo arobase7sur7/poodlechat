@@ -7935,8 +7935,7 @@ Emoji = {
     {
         {":anatomical_heart:"},
         "🫀"
-    }
-
+    },
     {
         {":melting_face:"},
         "🫠"
