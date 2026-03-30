@@ -10,10 +10,12 @@ files {
 	"html/index.html",
 	"html/index.css",
 	"html/emojibase.json",
+	"html/app.js",
 	"html/js/core.js",
 	"html/js/emoji.js",
 	"html/js/widgets.js",
 	"html/js/app.js",
+	"html/js/ui_runtime.js",
 	"html/Message.js",
 	"html/Suggestions.js",
 	"html/vendor/vue.2.3.3.min.js",
@@ -36,18 +38,18 @@ shared_scripts {
 }
 
 client_scripts {
-	"client/client.lua",
 	"client/modules/bootstrap.lua",
 	"client/modules/emoji.lua",
 	"client/modules/chat.lua",
 	"client/modules/features.lua",
-	"client/modules/nui.lua"
+	"client/modules/nui.lua",
+	"client/client.lua"
 }
 
 server_scripts {
-	"server/server.lua",
 	"server/modules/bootstrap.lua",
 	"server/modules/emoji.lua",
 	"server/modules/chat.lua",
-	"server/modules/moderation.lua"
+	"server/modules/moderation.lua",
+	"server/server.lua"
 }

@@ -1,13 +1,35 @@
 local Client = PoodleChatClient
-local State = Client.state
-local config = Client.config
-local constants = Client.constants
+local State = nil
+local config = nil
+local constants = nil
+local uiConfig = nil
+local typingConfig = nil
+local bubbleConfig = nil
+local distanceConfig = nil
+local distanceUiConfig = nil
+local handlersRegistered = false
 
-local uiConfig = config.ui
-local typingConfig = config.typing
-local bubbleConfig = config.bubble
-local distanceConfig = config.distance
-local distanceUiConfig = config.distanceUi
+local function ensureContext()
+	if State and config and constants then
+		return true
+	end
+
+	State = Client.state
+	config = Client.config
+	constants = Client.constants
+
+	if not State or not config or not constants then
+		return false
+	end
+
+	uiConfig = config.ui or {}
+	typingConfig = config.typing or {}
+	bubbleConfig = config.bubble or {}
+	distanceConfig = config.distance or {}
+	distanceUiConfig = config.distanceUi or {}
+
+	return true
+end
 
 local function getTypingUpdateRate()
 	return math.max(50, tonumber(typingConfig.updateRate) or 200)
@@ -881,103 +903,115 @@ local function toggleBubbleDisplay()
 	return value
 end
 
-AddEventHandler('poodlechat:typingState', function(sourceId, active)
-	if not State.typingSystemEnabled then
+local function registerFeatureHandlers()
+	if handlersRegistered then
 		return
 	end
 
-	local myServerId = GetPlayerServerId(PlayerId())
-	local key = tostring(sourceId)
-	local enabled = active == true
-	State.typingRemoteStates[key] = enabled
-
-	if not State.typingDisplayEnabled then
-		setTypingOverhead(sourceId, false)
+	if not ensureContext() then
 		return
 	end
 
-	if tonumber(sourceId) ~= tonumber(myServerId) and enabled and not Client.isInProximity(sourceId, tonumber(typingConfig.maxDistance) or State.LocalMessageDistance) then
-		setTypingOverhead(sourceId, false)
-		return
-	end
+	AddEventHandler('poodlechat:typingState', function(sourceId, active)
+		if not State.typingSystemEnabled then
+			return
+		end
 
-	setTypingOverhead(sourceId, enabled)
-end)
+		local myServerId = GetPlayerServerId(PlayerId())
+		local key = tostring(sourceId)
+		local enabled = active == true
+		State.typingRemoteStates[key] = enabled
 
-AddEventHandler('poodlechat:bubbleMessage', function(sourceId, message)
-	removeOverheadMessage('typing-' .. tostring(sourceId))
-	State.typingRemoteStates[tostring(sourceId)] = false
+		if not State.typingDisplayEnabled then
+			setTypingOverhead(sourceId, false)
+			return
+		end
 
-	if not State.bubbleSystemEnabled or not State.bubbleDisplayEnabled then
-		return
-	end
+		if tonumber(sourceId) ~= tonumber(myServerId) and enabled and not Client.isInProximity(sourceId, tonumber(typingConfig.maxDistance) or State.LocalMessageDistance) then
+			setTypingOverhead(sourceId, false)
+			return
+		end
 
-	if not Client.isInProximity(sourceId, tonumber(bubbleConfig.maxDistance) or State.LocalMessageDistance) then
-		return
-	end
+		setTypingOverhead(sourceId, enabled)
+	end)
 
-	displayBubbleMessage(sourceId, message)
-end)
+	AddEventHandler('poodlechat:bubbleMessage', function(sourceId, message)
+		removeOverheadMessage('typing-' .. tostring(sourceId))
+		State.typingRemoteStates[tostring(sourceId)] = false
 
-CreateThread(function()
-	while true do
-		local hasEntries = next(State.OverheadMessages) ~= nil
-		Wait(hasEntries and State.OverheadUpdateIntervalMs or constants.overheadIdleMs)
+		if not State.bubbleSystemEnabled or not State.bubbleDisplayEnabled then
+			return
+		end
 
-		if hasEntries then
-			local now = GetGameTimer()
-			local myCoords = GetEntityCoords(PlayerPedId())
+		if not Client.isInProximity(sourceId, tonumber(bubbleConfig.maxDistance) or State.LocalMessageDistance) then
+			return
+		end
 
-			for id, entry in pairs(State.OverheadMessages) do
-				if entry.expiresAt and now >= entry.expiresAt then
-					removeOverheadMessage(id)
-				else
-					local onScreen, screenX, screenY = getPedScreenCoord(entry.serverId, entry.offset, entry.maxDistance, myCoords)
+		displayBubbleMessage(sourceId, message)
+	end)
 
-					if onScreen == nil then
+	CreateThread(function()
+		while true do
+			local hasEntries = next(State.OverheadMessages) ~= nil
+			Wait(hasEntries and State.OverheadUpdateIntervalMs or constants.overheadIdleMs)
+
+			if hasEntries then
+				local now = GetGameTimer()
+				local myCoords = GetEntityCoords(PlayerPedId())
+
+				for id, entry in pairs(State.OverheadMessages) do
+					if entry.expiresAt and now >= entry.expiresAt then
 						removeOverheadMessage(id)
 					else
-						Client.sendNuiMessage({
-							type = 'update3dMessage',
-							id = id,
-							onScreen = onScreen,
-							screenX = screenX,
-							screenY = screenY
-						})
+						local onScreen, screenX, screenY = getPedScreenCoord(entry.serverId, entry.offset, entry.maxDistance, myCoords)
+
+						if onScreen == nil then
+							removeOverheadMessage(id)
+						else
+							Client.sendNuiMessage({
+								type = 'update3dMessage',
+								id = id,
+								onScreen = onScreen,
+								screenX = screenX,
+								screenY = screenY
+							})
+						end
 					end
 				end
 			end
 		end
-	end
-end)
-
-if State.distanceEnabled then
-	CreateThread(function()
-		local pollRate = math.max(100, tonumber(distanceConfig.pollRate) or 500)
-
-		while true do
-			Wait(pollRate)
-			refreshDistanceState(false)
-		end
 	end)
-end
 
-AddEventHandler('pma-voice:setTalkingMode', function()
 	if State.distanceEnabled then
-		refreshDistanceModeCount()
-		refreshDistanceState(true)
+		CreateThread(function()
+			local pollRate = math.max(100, tonumber(distanceConfig.pollRate) or 500)
+
+			while true do
+				Wait(pollRate)
+				refreshDistanceState(false)
+			end
+		end)
 	end
-end)
 
-if State.distanceEnabled and type(AddStateBagChangeHandler) == 'function' then
-	AddStateBagChangeHandler('proximity', nil, function(bagName)
-		local localBag = 'player:' .. tostring(GetPlayerServerId(PlayerId()))
-		if bagName ~= localBag then
-			return
+	AddEventHandler('pma-voice:setTalkingMode', function()
+		if State.distanceEnabled then
+			refreshDistanceModeCount()
+			refreshDistanceState(true)
 		end
-
-		refreshDistanceState(true)
 	end)
+
+	if State.distanceEnabled and type(AddStateBagChangeHandler) == 'function' then
+		AddStateBagChangeHandler('proximity', nil, function(bagName)
+			local localBag = 'player:' .. tostring(GetPlayerServerId(PlayerId()))
+			if bagName ~= localBag then
+				return
+			end
+
+			refreshDistanceState(true)
+		end)
+	end
+
+	handlersRegistered = true
 end
 
 Client.getFeatureStatePayload = getFeatureStatePayload
@@ -993,4 +1027,5 @@ Client.toggleTypingDisplay = toggleTypingDisplay
 Client.toggleBubbleDisplay = toggleBubbleDisplay
 Client.setTypingDisplayEnabled = setTypingDisplayEnabled
 Client.setBubbleDisplayEnabled = setBubbleDisplayEnabled
+Client.registerFeatureHandlers = registerFeatureHandlers
 

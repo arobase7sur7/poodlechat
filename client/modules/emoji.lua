@@ -1,6 +1,15 @@
 local Client = PoodleChatClient
-local State = Client.state
 local SharedEmoji = (PoodleChatShared and PoodleChatShared.Emoji) or {}
+local State = nil
+
+local function ensureContext()
+	if State then
+		return true
+	end
+
+	State = Client.state
+	return State ~= nil
+end
 
 local function normalizeCategoryId(value, fallback)
 	if type(SharedEmoji.normalizeCategoryId) == 'function' then
@@ -65,10 +74,18 @@ local function resolveEmojiGlyph(entry)
 end
 
 local function markEmojiDirty()
+	if not ensureContext() then
+		return
+	end
+
 	State.sortedEmojiDirty = true
 end
 
 local function buildEmojiIndex()
+	if not ensureContext() then
+		return
+	end
+
 	State.emojiAliasesByGlyph = {}
 
 	for i = 1, #State.emojiEntries do
@@ -94,6 +111,10 @@ local function buildEmojiIndex()
 end
 
 local function getSortedEmoji()
+	if not ensureContext() then
+		return {}
+	end
+
 	if State.sortedEmojiCache and not State.sortedEmojiDirty then
 		return State.sortedEmojiCache
 	end
@@ -128,6 +149,10 @@ function SortEmoji()
 end
 
 local function buildEmojiUsageEntriesFromGlyphs(glyphList, limit)
+	if not ensureContext() then
+		return {}
+	end
+
 	local entries = {}
 	local maxEntries = math.max(1, tonumber(limit) or 10)
 
@@ -150,6 +175,10 @@ local function buildEmojiUsageEntriesFromGlyphs(glyphList, limit)
 end
 
 local function buildTopEmojiUsageEntries(limit)
+	if not ensureContext() then
+		return {}
+	end
+
 	local entries = {}
 	local sorted = getSortedEmoji()
 	local maxEntries = math.max(1, tonumber(limit) or 10)
@@ -175,6 +204,10 @@ local function buildTopEmojiUsageEntries(limit)
 end
 
 local function addEmojiRecent(glyph)
+	if not ensureContext() then
+		return
+	end
+
 	if type(glyph) ~= 'string' or glyph == '' then
 		return
 	end
@@ -235,6 +268,10 @@ local function buildCategoryListFromRawEntries(rawEntries)
 end
 
 local function parseEmojiDataset()
+	if not ensureContext() then
+		return
+	end
+
 	local data = LoadResourceFile(GetCurrentResourceName(), 'html/emojibase.json')
 
 	if not data or data == '' then
@@ -327,6 +364,13 @@ local function parseEmojiDataset()
 end
 
 local function getEmojiPanelData()
+	if not ensureContext() then
+		return {
+			recent = {},
+			top = {}
+		}
+	end
+
 	return {
 		recent = buildEmojiUsageEntriesFromGlyphs(State.EmojiRecent, State.EmojiRecentLimit),
 		top = buildTopEmojiUsageEntries(State.EmojiTopLimit)
@@ -334,6 +378,15 @@ local function getEmojiPanelData()
 end
 
 local function handleEmojiUse(glyph)
+	if not ensureContext() then
+		return {
+			panel = {
+				recent = {},
+				top = {}
+			}
+		}
+	end
+
 	if type(glyph) == 'string' and glyph ~= '' then
 		local current = tonumber(State.EmojiUsage[glyph]) or 0
 		State.EmojiUsage[glyph] = current + 1
@@ -347,7 +400,11 @@ local function handleEmojiUse(glyph)
 	}
 end
 
-function AddEmojiSuggestions()
+local function addEmojiSuggestions()
+	if not ensureContext() then
+		return
+	end
+
 	local suggestions = {}
 
 	for i = 1, #State.emojiEntries do
@@ -372,5 +429,5 @@ Client.addEmojiRecent = addEmojiRecent
 Client.parseEmojiDataset = parseEmojiDataset
 Client.getEmojiPanelData = getEmojiPanelData
 Client.handleEmojiUse = handleEmojiUse
-Client.AddEmojiSuggestions = AddEmojiSuggestions
+Client.AddEmojiSuggestions = addEmojiSuggestions
 

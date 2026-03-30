@@ -1,73 +1,11 @@
 PoodleChatServer = PoodleChatServer or {}
 
 local Server = PoodleChatServer
-
-RegisterServerEvent('chat:init')
-RegisterServerEvent('chat:addTemplate')
-RegisterServerEvent('chat:addMessage')
-RegisterServerEvent('chat:addSuggestion')
-RegisterServerEvent('chat:removeSuggestion')
-RegisterServerEvent('_chat:messageEntered')
-RegisterServerEvent('chat:clear')
-RegisterServerEvent('__cfx_internal:commandFallback')
-RegisterNetEvent('playerJoining')
-
-RegisterNetEvent('poodlechat:staffMessage')
-RegisterNetEvent('poodlechat:globalMessage')
-RegisterNetEvent('poodlechat:actionMessage')
-RegisterNetEvent('poodlechat:whisperMessage')
-RegisterNetEvent('poodlechat:getPermissions')
-RegisterNetEvent('poodlechat:report')
-RegisterNetEvent('poodlechat:mute')
-RegisterNetEvent('poodlechat:unmute')
-RegisterNetEvent('poodlechat:showMuted')
-RegisterNetEvent('poodlechat:typingState')
-RegisterNetEvent('poodlechat:bubbleMessage')
-
-local chatConfig = Config.Chat or {}
-local accessConfig = Config.Access or {}
-local typingConfig = Config.TypingIndicator or {}
-local bubbleConfig = Config.ChatBubbles or {}
-local discordConfig = Config.Discord or {}
-local runtimeConfig = Config.Runtime or {}
-local serverRuntime = type(runtimeConfig.server) == 'table' and runtimeConfig.server or {}
-
-local IdentifierType = tostring(accessConfig.identifier or 'license')
-local StaffChannelAce = tostring(accessConfig.staffChannelAce or 'chat.staffChannel')
-local NoMuteAce = tostring(accessConfig.noMuteAce or 'chat.noMute')
-local Roles = type(accessConfig.roles) == 'table' and accessConfig.roles or {}
-
-local MaxNicknameLen = math.max(1, tonumber(chatConfig.maxNicknameLen) or 30)
-local PrintToConsole = chatConfig.printToConsole ~= false
-local LocalMessageColor = chatConfig.localColor or {0, 153, 204}
-local GlobalMessageColor = chatConfig.globalColor or {212, 175, 55}
-local StaffMessageColor = chatConfig.staffColor or {255, 64, 0}
-local ActionMessageDistance = tonumber(chatConfig.actionDistance) or 50.0
-local LocalMessageDistance = tonumber(chatConfig.localDistance) or 50.0
-
-Server.config = {
-	chat = chatConfig,
-	access = accessConfig,
-	typing = typingConfig,
-	bubble = bubbleConfig,
-	discord = discordConfig,
-	runtime = serverRuntime
-}
-
-Server.constants = {
-	IdentifierType = IdentifierType,
-	StaffChannelAce = StaffChannelAce,
-	NoMuteAce = NoMuteAce,
-	Roles = Roles,
-	MaxNicknameLen = MaxNicknameLen,
-	PrintToConsole = PrintToConsole,
-	LocalMessageColor = LocalMessageColor,
-	GlobalMessageColor = GlobalMessageColor,
-	StaffMessageColor = StaffMessageColor,
-	ActionMessageDistance = ActionMessageDistance,
-	LocalMessageDistance = LocalMessageDistance,
-	refreshCommandsDelayMs = math.max(0, tonumber(serverRuntime.refreshCommandsDelayMs) or 500)
-}
+local bootstrapInitialized = false
+local constants = nil
+local nicknames = nil
+local identifierCache = nil
+local typingStateBySource = nil
 
 local logColors = {
 	name = '\x1B[35m',
@@ -126,6 +64,8 @@ local function toDiscordColor(value, fallback)
 end
 
 local function getDiscordColor(kind, fallback)
+	local config = Server.config or {}
+	local discordConfig = config.discord or {}
 	local colors = type(discordConfig.colors) == 'table' and discordConfig.colors or {}
 	local base = colors[kind]
 	if base == nil then
@@ -135,6 +75,8 @@ local function getDiscordColor(kind, fallback)
 end
 
 local function isDiscordConfigured()
+	local config = Server.config or {}
+	local discordConfig = config.discord or {}
 	return discordConfig.enabled == true and isSet(discordConfig.webhook)
 end
 
@@ -142,6 +84,9 @@ local function isDiscordKindEnabled(kind)
 	if not isDiscordConfigured() then
 		return false
 	end
+
+	local config = Server.config or {}
+	local discordConfig = config.discord or {}
 
 	if kind == 'local' then
 		return discordConfig.sendLocal == true
@@ -182,6 +127,8 @@ local function sendDiscordWebhook(kind, source, name, message, colorOverride, ca
 		return false
 	end
 
+	local config = Server.config or {}
+	local discordConfig = config.discord or {}
 	local webhook = tostring(discordConfig.webhook)
 	local username = tostring(discordConfig.username or 'PoodleChat')
 	local footer = tostring(discordConfig.footer or 'poodlechat')
@@ -228,10 +175,6 @@ local function sendDiscordWebhook(kind, source, name, message, colorOverride, ca
 	return true
 end
 
-local nicknames = decodeTableOrEmpty(GetResourceKvpString('nicknames'))
-local identifierCache = {}
-local typingStateBySource = {}
-
 local function toPlayerKey(source)
 	return tostring(source)
 end
@@ -272,7 +215,7 @@ local function normalizeMessage(value)
 	return tostring(value or '')
 end
 
-function GetIDFromSource(idType, source)
+local function getIdFromSource(idType, source)
 	local normalizedType = idType and tostring(idType):lower()
 	if not normalizedType or not source then
 		return nil
@@ -282,15 +225,23 @@ function GetIDFromSource(idType, source)
 	return identifiers[normalizedType]
 end
 
-function GetNickname(source)
-	local identifier = GetIDFromSource(IdentifierType, source)
+local function getNickname(source)
+	if not constants then
+		return nil
+	end
+
+	local identifier = getIdFromSource(constants.IdentifierType, source)
 	if identifier then
 		return nicknames[identifier]
 	end
 end
 
-function HasNickname(source)
-	local identifier = GetIDFromSource(IdentifierType, source)
+local function hasNickname(source)
+	if not constants then
+		return false
+	end
+
+	local identifier = getIdFromSource(constants.IdentifierType, source)
 	if identifier then
 		return nicknames[identifier] ~= nil
 	end
@@ -298,8 +249,12 @@ function HasNickname(source)
 	return false
 end
 
-function SetNickname(source, nickname)
-	local identifier = GetIDFromSource(IdentifierType, source)
+local function setNickname(source, nickname)
+	if not constants then
+		return false
+	end
+
+	local identifier = getIdFromSource(constants.IdentifierType, source)
 	if not identifier then
 		return false
 	end
@@ -309,54 +264,54 @@ function SetNickname(source, nickname)
 	return true
 end
 
-function GetRealName(source)
+local function getRealName(source)
 	return GetPlayerName(source) or '?'
 end
 
-function GetName(source)
-	if HasNickname(source) then
-		return GetNickname(source)
+local function getName(source)
+	if hasNickname(source) then
+		return getNickname(source)
 	end
 
-	return GetRealName(source)
+	return getRealName(source)
 end
 
-exports('getName', GetName)
-
-function GetNameWithId(source)
-	return '[' .. source .. '] ' .. GetName(source)
+local function getNameWithId(source)
+	return '[' .. source .. '] ' .. getName(source)
 end
 
-RegisterCommand('nick', function(source, args)
-	local nickname = args[1] and table.concat(args, ' ')
+local function registerNicknameCommand()
+	RegisterCommand('nick', function(source, args)
+		local nickname = args[1] and table.concat(args, ' ')
 
-	if nickname and string.len(nickname) > MaxNicknameLen then
-		TriggerClientEvent('chat:addMessage', source, {
-			color = {255, 0, 0},
-			args = {'Error', 'Nicknames cannot be more than ' .. MaxNicknameLen .. ' characters long'}
-		})
-		return
-	end
-
-	if SetNickname(source, nickname) then
-		if nickname then
+		if nickname and string.len(nickname) > constants.MaxNicknameLen then
 			TriggerClientEvent('chat:addMessage', source, {
-				color = {255, 255, 128},
-				args = {'Your nickname was set to ' .. nickname}
+				color = {255, 0, 0},
+				args = {'Error', 'Nicknames cannot be more than ' .. constants.MaxNicknameLen .. ' characters long'}
 			})
+			return
+		end
+
+		if setNickname(source, nickname) then
+			if nickname then
+				TriggerClientEvent('chat:addMessage', source, {
+					color = {255, 255, 128},
+					args = {'Your nickname was set to ' .. nickname}
+				})
+			else
+				TriggerClientEvent('chat:addMessage', source, {
+					color = {255, 255, 128},
+					args = {'Your nickname has been unset'}
+				})
+			end
 		else
 			TriggerClientEvent('chat:addMessage', source, {
-				color = {255, 255, 128},
-				args = {'Your nickname has been unset'}
+				color = {255, 0, 0},
+				args = {'Error', 'Failed to set nickname'}
 			})
 		end
-	else
-		TriggerClientEvent('chat:addMessage', source, {
-			color = {255, 0, 0},
-			args = {'Error', 'Failed to set nickname'}
-		})
-	end
-end, true)
+	end, true)
+end
 
 local function refreshCommands(player)
 	if not GetRegisteredCommands then
@@ -379,11 +334,11 @@ local function refreshCommands(player)
 end
 
 local function getMessageLicense(source)
-	if IsPlayerAceAllowed(source, NoMuteAce) then
+	if IsPlayerAceAllowed(source, constants.NoMuteAce) then
 		return false
 	end
 
-	return GetIDFromSource(IdentifierType, source)
+	return getIdFromSource(constants.IdentifierType, source)
 end
 
 local function triggerClientEventForTargets(eventName, targets, ...)
@@ -460,11 +415,12 @@ local function getNearbyPlayers(source, distance)
 end
 
 local function getNameWithRoleAndColor(source)
-	local name = GetName(source)
+	local name = getName(source)
 	local role = nil
+	local roles = constants.Roles
 
-	for index = 1, #Roles do
-		local current = Roles[index]
+	for index = 1, #roles do
+		local current = roles[index]
 		if current and current.ace and IsPlayerAceAllowed(source, current.ace) then
 			role = current
 			break
@@ -482,29 +438,105 @@ local function escapePattern(value)
 	return value:gsub('([%(%)%.%%%+%-%*%?%[%^%$])', '%%%1')
 end
 
-Server.state = {
-	nicknames = nicknames,
-	identifierCache = identifierCache,
-	typingStateBySource = typingStateBySource
-}
+local function setupBootstrap()
+	if bootstrapInitialized then
+		return
+	end
 
-Server.log = log
-Server.decodeTableOrEmpty = decodeTableOrEmpty
-Server.isSet = isSet
-Server.toDiscordColor = toDiscordColor
-Server.getDiscordColor = getDiscordColor
-Server.isDiscordConfigured = isDiscordConfigured
-Server.isDiscordKindEnabled = isDiscordKindEnabled
-Server.sanitizeDiscordText = sanitizeDiscordText
-Server.sendDiscordWebhook = sendDiscordWebhook
-Server.clearIdentifierCache = clearIdentifierCache
-Server.getIdentifierMap = getIdentifierMap
-Server.normalizeMessage = normalizeMessage
-Server.refreshCommands = refreshCommands
-Server.getMessageLicense = getMessageLicense
-Server.triggerClientEventForTargets = triggerClientEventForTargets
-Server.triggerClientEventForTargetsNoFallback = triggerClientEventForTargetsNoFallback
-Server.getNearbyPlayers = getNearbyPlayers
-Server.getNameWithRoleAndColor = getNameWithRoleAndColor
-Server.escapePattern = escapePattern
+	local chatConfig = Config.Chat or {}
+	local accessConfig = Config.Access or {}
+	local typingConfig = Config.TypingIndicator or {}
+	local bubbleConfig = Config.ChatBubbles or {}
+	local discordConfig = Config.Discord or {}
+	local runtimeConfig = Config.Runtime or {}
+	local serverRuntime = type(runtimeConfig.server) == 'table' and runtimeConfig.server or {}
 
+	local identifierType = tostring(accessConfig.identifier or 'license')
+	local staffChannelAce = tostring(accessConfig.staffChannelAce or 'chat.staffChannel')
+	local noMuteAce = tostring(accessConfig.noMuteAce or 'chat.noMute')
+	local roles = type(accessConfig.roles) == 'table' and accessConfig.roles or {}
+
+	local maxNicknameLen = math.max(1, tonumber(chatConfig.maxNicknameLen) or 30)
+	local printToConsole = chatConfig.printToConsole ~= false
+	local localMessageColor = chatConfig.localColor or {0, 153, 204}
+	local globalMessageColor = chatConfig.globalColor or {212, 175, 55}
+	local staffMessageColor = chatConfig.staffColor or {255, 64, 0}
+	local actionMessageDistance = tonumber(chatConfig.actionDistance) or 50.0
+	local localMessageDistance = tonumber(chatConfig.localDistance) or 50.0
+
+	Server.config = {
+		chat = chatConfig,
+		access = accessConfig,
+		typing = typingConfig,
+		bubble = bubbleConfig,
+		discord = discordConfig,
+		runtime = serverRuntime
+	}
+
+	Server.constants = {
+		IdentifierType = identifierType,
+		StaffChannelAce = staffChannelAce,
+		NoMuteAce = noMuteAce,
+		Roles = roles,
+		MaxNicknameLen = maxNicknameLen,
+		PrintToConsole = printToConsole,
+		LocalMessageColor = localMessageColor,
+		GlobalMessageColor = globalMessageColor,
+		StaffMessageColor = staffMessageColor,
+		ActionMessageDistance = actionMessageDistance,
+		LocalMessageDistance = localMessageDistance,
+		refreshCommandsDelayMs = math.max(0, tonumber(serverRuntime.refreshCommandsDelayMs) or 500)
+	}
+
+	constants = Server.constants
+	nicknames = decodeTableOrEmpty(GetResourceKvpString('nicknames'))
+	identifierCache = {}
+	typingStateBySource = {}
+
+	Server.state = {
+		nicknames = nicknames,
+		identifierCache = identifierCache,
+		typingStateBySource = typingStateBySource
+	}
+
+	Server.log = log
+	Server.decodeTableOrEmpty = decodeTableOrEmpty
+	Server.isSet = isSet
+	Server.toDiscordColor = toDiscordColor
+	Server.getDiscordColor = getDiscordColor
+	Server.isDiscordConfigured = isDiscordConfigured
+	Server.isDiscordKindEnabled = isDiscordKindEnabled
+	Server.sanitizeDiscordText = sanitizeDiscordText
+	Server.sendDiscordWebhook = sendDiscordWebhook
+	Server.clearIdentifierCache = clearIdentifierCache
+	Server.getIdentifierMap = getIdentifierMap
+	Server.normalizeMessage = normalizeMessage
+	Server.refreshCommands = refreshCommands
+	Server.getMessageLicense = getMessageLicense
+	Server.triggerClientEventForTargets = triggerClientEventForTargets
+	Server.triggerClientEventForTargetsNoFallback = triggerClientEventForTargetsNoFallback
+	Server.getNearbyPlayers = getNearbyPlayers
+	Server.getNameWithRoleAndColor = getNameWithRoleAndColor
+	Server.escapePattern = escapePattern
+	Server.getIdFromSource = getIdFromSource
+	Server.getNickname = getNickname
+	Server.hasNickname = hasNickname
+	Server.setNickname = setNickname
+	Server.getRealName = getRealName
+	Server.getName = getName
+	Server.getNameWithId = getNameWithId
+	Server.registerNicknameCommand = registerNicknameCommand
+
+	GetIDFromSource = getIdFromSource
+	GetNickname = getNickname
+	HasNickname = hasNickname
+	SetNickname = setNickname
+	GetRealName = getRealName
+	GetName = getName
+	GetNameWithId = getNameWithId
+
+	exports('getName', getName)
+	bootstrapInitialized = true
+end
+
+Server.setupBootstrap = setupBootstrap

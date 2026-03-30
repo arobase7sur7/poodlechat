@@ -3,6 +3,7 @@ local SharedEmoji = (PoodleChatShared and PoodleChatShared.Emoji) or {}
 
 local emojiAliasLookup = {}
 local emojiFallbackAliases = {}
+local emojiInitialized = false
 
 local function buildEmojiAliasFromName(name)
 	if type(SharedEmoji.buildAliasFromName) == 'function' then
@@ -149,8 +150,16 @@ local function Emojit(text)
 	return text
 end
 
-loadEmojiAliasLookup()
+local function initializeEmoji()
+	if emojiInitialized then
+		return
+	end
+
+	loadEmojiAliasLookup()
+	emojiInitialized = true
+end
 
 Server.loadEmojiAliasLookup = loadEmojiAliasLookup
 Server.Emojit = Emojit
+Server.initializeEmoji = initializeEmoji
 

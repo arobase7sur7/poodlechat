@@ -1,16 +1,35 @@
 local Client = PoodleChatClient
-local State = Client.state
-local config = Client.config
-local constants = Client.constants
+local State = nil
+local config = nil
+local constants = nil
+local chatConfig = nil
+local uiConfig = nil
+local runtimeUiConfig = nil
+local channelIdByName = nil
+local channelNameById = nil
+local handlersRegistered = false
 
-local chatConfig = config.chat
-local uiConfig = config.ui
-local typingConfig = config.typing
-local bubbleConfig = config.bubble
-local runtimeUiConfig = type((Config.Runtime or {}).ui) == 'table' and (Config.Runtime or {}).ui or {}
+local function ensureContext()
+	if State and config and constants then
+		return true
+	end
 
-local channelIdByName = constants.channelIdByName
-local channelNameById = constants.channelNameById
+	State = Client.state
+	config = Client.config
+	constants = Client.constants
+
+	if not State or not config or not constants then
+		return false
+	end
+
+	chatConfig = config.chat or {}
+	uiConfig = config.ui or {}
+	runtimeUiConfig = type((Config.Runtime or {}).ui) == 'table' and (Config.Runtime or {}).ui or {}
+	channelIdByName = constants.channelIdByName or {}
+	channelNameById = constants.channelNameById or {}
+
+	return true
+end
 
 local function isMutedLicense(license)
 	return license and State.MutedPlayers[license] ~= nil
@@ -20,11 +39,11 @@ local function addTaggedMessage(tag, name, color, message)
 	Client.addChatMessage(color, tag .. name, message)
 end
 
-function AddGlobalMessage(name, color, message)
+local function addGlobalMessage(name, color, message)
 	addTaggedMessage('[Global] ', name, color, message)
 end
 
-function AddLocalMessage(name, color, message)
+local function addLocalMessage(name, color, message)
 	if State.distanceEnabled and State.distanceState and State.distanceState.enabled then
 		local label = tostring(State.distanceState.label or '')
 		if label ~= '' then
@@ -64,114 +83,17 @@ local function sendSuggestionBatch(suggestions)
 	end
 end
 
-function GlobalCommand(_, args)
+local function globalCommand(_, args)
 	TriggerServerEvent('poodlechat:globalMessage', table.concat(args, ' '))
 end
 
-RegisterCommand('global', GlobalCommand, false)
-RegisterCommand('g', GlobalCommand, false)
-
-RegisterCommand('me', function(_, args)
-	TriggerServerEvent('poodlechat:actionMessage', table.concat(args, ' '))
-end, false)
-
-function WhisperCommand(_, args)
+local function whisperCommand(_, args)
 	local id = args[1]
 	table.remove(args, 1)
 	TriggerServerEvent('poodlechat:whisperMessage', id, table.concat(args, ' '))
 end
 
-RegisterCommand('whisper', WhisperCommand, false)
-RegisterCommand('w', WhisperCommand, false)
-
-RegisterCommand('clear', function()
-	TriggerEvent('chat:clear')
-end, false)
-
-RegisterCommand('toggleoverhead', function()
-	State.DisplayMessagesAbovePlayers = not State.DisplayMessagesAbovePlayers
-	Client.addChatMessage({255, 255, 128}, 'Overhead messages', State.DisplayMessagesAbovePlayers and 'on' or 'off')
-	SetResourceKvp('displayMessagesAbovePlayers', State.DisplayMessagesAbovePlayers and 'true' or 'false')
-end, false)
-
-RegisterCommand('toggletyping', function()
-	Client.toggleTypingDisplay()
-end, false)
-
-RegisterCommand('togglebubbles', function()
-	Client.toggleBubbleDisplay()
-end, false)
-
-AddEventHandler('poodlechat:globalMessage', function(id, license, name, color, message)
-	if isMutedLicense(license) then
-		return
-	end
-
-	AddGlobalMessage(name, color, message)
-
-	if State.DisplayMessagesAbovePlayers then
-		Client.displayTextAbovePlayer(id, color, message)
-	end
-end)
-
-AddEventHandler('poodlechat:localMessage', function(id, license, name, color, message)
-	if isMutedLicense(license) then
-		return
-	end
-
-	if Client.isInProximity(id, State.LocalMessageDistance) then
-		AddLocalMessage(name, color, message)
-
-		if State.DisplayMessagesAbovePlayers then
-			Client.displayTextAbovePlayer(id, color, message)
-		end
-	end
-end)
-
-AddEventHandler('poodlechat:action', function(id, license, name, message)
-	if isMutedLicense(license) then
-		return
-	end
-
-	if Client.isInProximity(id, State.ActionMessageDistance) then
-		Client.addChatMessage(State.ActionMessageColor, '^*' .. name .. '^r^* ' .. message)
-
-		if State.DisplayMessagesAbovePlayers then
-			Client.displayTextAbovePlayer(id, State.ActionMessageColor, '*' .. message .. '*')
-		end
-	end
-end)
-
-AddEventHandler('poodlechat:whisperEcho', function(_, license, name, message)
-	if isMutedLicense(license) then
-		Client.addChatMessage({255, 0, 0}, 'Error', name .. ' is muted')
-		return
-	end
-
-	Client.addChatMessage(State.WhisperEchoColor, '[Whisper@' .. name .. ']', message)
-
-	if State.DisplayMessagesAbovePlayers then
-		Client.displayTextAbovePlayer(GetPlayerServerId(PlayerId()), State.WhisperColor, message)
-	end
-end)
-
-AddEventHandler('poodlechat:whisper', function(id, license, name, message)
-	if isMutedLicense(license) then
-		return
-	end
-
-	Client.addChatMessage(State.WhisperColor, '[Whisper] ' .. name, message)
-
-	if State.DisplayMessagesAbovePlayers then
-		Client.displayTextAbovePlayer(id, State.WhisperColor, message)
-	end
-end)
-
-AddEventHandler('poodlechat:whisperError', function(id)
-	Client.addChatMessage({255, 0, 0}, 'Error', 'No user with ID or name ' .. tostring(id))
-end)
-
-function ReplyCommand(_, args)
+local function replyCommand(_, args)
 	if State.ReplyTo then
 		TriggerServerEvent('poodlechat:whisperMessage', State.ReplyTo, table.concat(args, ' '))
 	else
@@ -179,14 +101,11 @@ function ReplyCommand(_, args)
 	end
 end
 
-RegisterCommand('reply', ReplyCommand, false)
-RegisterCommand('r', ReplyCommand, false)
+local function setChannel(name)
+	if not ensureContext() then
+		return
+	end
 
-AddEventHandler('poodlechat:setReplyTo', function(id)
-	State.ReplyTo = tostring(id)
-end)
-
-function SetChannel(name)
 	local channelId = channelIdByName[name]
 	if not channelId then
 		return
@@ -200,7 +119,11 @@ function SetChannel(name)
 	})
 end
 
-function CycleChannel()
+local function cycleChannel()
+	if not ensureContext() then
+		return
+	end
+
 	local sequence
 	if State.Permissions.canAccessStaffChannel then
 		sequence = {'Local', 'Global', 'Staff'}
@@ -217,7 +140,7 @@ function CycleChannel()
 	end
 
 	if not currentIndex then
-		SetChannel(sequence[1])
+		setChannel(sequence[1])
 		return
 	end
 
@@ -226,113 +149,14 @@ function CycleChannel()
 		nextIndex = 1
 	end
 
-	SetChannel(sequence[nextIndex])
+	setChannel(sequence[nextIndex])
 end
 
-RegisterCommand('togglechat', function()
-	State.HideChat = not State.HideChat
-end)
-
-RegisterCommand('staff', function(_, args)
-	local message = table.concat(args, ' ')
-
-	if message == '' then
+local function loadSavedSettings()
+	if not ensureContext() then
 		return
 	end
 
-	TriggerServerEvent('poodlechat:staffMessage', message)
-end)
-
-AddEventHandler('poodlechat:staffMessage', function(id, name, color, message)
-	Client.addChatMessage(color, '[Staff] ' .. name, message)
-
-	if State.DisplayMessagesAbovePlayers then
-		Client.displayTextAbovePlayer(id, color, message)
-	end
-end)
-
-AddEventHandler('poodlechat:setPermissions', function(permissions)
-	State.Permissions = permissions
-
-	Client.sendNuiMessage({
-		type = 'setPermissions',
-		permissions = json.encode(permissions)
-	})
-end)
-
-RegisterCommand('report', function(_, args)
-	if #args < 2 then
-		Client.addChatMessage({255, 0, 0}, 'Error', 'You must specify a player and a reason')
-		return
-	end
-
-	local player = table.remove(args, 1)
-	local reason = table.concat(args, ' ')
-
-	TriggerServerEvent('poodlechat:report', player, reason)
-end, false)
-
-RegisterCommand('mute', function(_, args)
-	if #args < 1 then
-		Client.addChatMessage({255, 0, 0}, 'Error', 'You must specify a player to mute')
-		return
-	end
-
-	TriggerServerEvent('poodlechat:mute', args[1])
-end, false)
-
-AddEventHandler('poodlechat:mute', function(id, license)
-	local player = GetPlayerFromServerId(id)
-	local name = player ~= -1 and GetPlayerName(player) or tostring(id)
-
-	State.MutedPlayers[license] = name
-
-	Client.addChatMessage({255, 255, 128}, name .. ' was muted')
-	Client.encodeAndStore('mutedPlayers', State.MutedPlayers)
-end)
-
-RegisterCommand('unmute', function(_, args)
-	if #args < 1 then
-		Client.addChatMessage({255, 0, 0}, 'Error', 'You must specify a player to unmute')
-		return
-	end
-
-	TriggerServerEvent('poodlechat:unmute', args[1])
-end)
-
-AddEventHandler('poodlechat:unmute', function(id, license)
-	local player = GetPlayerFromServerId(id)
-	local name = player ~= -1 and GetPlayerName(player) or tostring(id)
-
-	State.MutedPlayers[license] = nil
-
-	Client.addChatMessage({255, 255, 128}, name .. ' was unmuted')
-	Client.encodeAndStore('mutedPlayers', State.MutedPlayers)
-end)
-
-RegisterCommand('muted', function()
-	TriggerServerEvent('poodlechat:showMuted', State.MutedPlayers)
-end)
-
-AddEventHandler('poodlechat:showMuted', function(mutedPlayerIds)
-	local muted = {}
-
-	table.sort(mutedPlayerIds)
-
-	for _, id in ipairs(mutedPlayerIds) do
-		local player = GetPlayerFromServerId(id)
-		local name = player ~= -1 and GetPlayerName(player) or tostring(id)
-		muted[#muted + 1] = string.format('%s [%d]', name, id)
-	end
-
-	if #muted == 0 then
-		Client.addChatMessage({255, 255, 128}, 'No players are muted')
-	else
-		Client.addChatMessage({255, 255, 128}, 'Muted', table.concat(muted, ', '))
-	end
-end)
-
-function LoadSavedSettings()
 	local mutedJson = GetResourceKvpString('mutedPlayers')
 	local muted = Client.decodeJson(mutedJson)
 
@@ -495,6 +319,10 @@ local startupSuggestions = {
 }
 
 local function registerStartupSuggestions()
+	if not ensureContext() then
+		return
+	end
+
 	for i = 1, #startupSuggestions do
 		local suggestion = startupSuggestions[i]
 		TriggerEvent('chat:addSuggestion', suggestion[1], suggestion[2], suggestion[3])
@@ -510,6 +338,10 @@ local function registerStartupSuggestions()
 end
 
 local function refreshCommands()
+	if not ensureContext() then
+		return
+	end
+
 	if not GetRegisteredCommands then
 		return
 	end
@@ -530,6 +362,10 @@ local function refreshCommands()
 end
 
 local function refreshThemes()
+	if not ensureContext() then
+		return
+	end
+
 	local themes = {}
 
 	for resourceIndex = 0, GetNumResources() - 1 do
@@ -557,7 +393,11 @@ local function refreshThemes()
 end
 
 local function buildOnLoadPayload()
-	SetChannel(State.Channel)
+	if not ensureContext() then
+		return {}
+	end
+
+	setChannel(State.Channel)
 	Client.refreshDistanceState(true)
 	Client.sendFeatureState()
 
@@ -586,13 +426,232 @@ local function buildOnLoadPayload()
 	}
 end
 
+local function registerChatHandlers()
+	if handlersRegistered then
+		return
+	end
+
+	if not ensureContext() then
+		return
+	end
+
+	RegisterCommand('global', globalCommand, false)
+	RegisterCommand('g', globalCommand, false)
+
+	RegisterCommand('me', function(_, args)
+		TriggerServerEvent('poodlechat:actionMessage', table.concat(args, ' '))
+	end, false)
+
+	RegisterCommand('whisper', whisperCommand, false)
+	RegisterCommand('w', whisperCommand, false)
+
+	RegisterCommand('clear', function()
+		TriggerEvent('chat:clear')
+	end, false)
+
+	RegisterCommand('toggleoverhead', function()
+		State.DisplayMessagesAbovePlayers = not State.DisplayMessagesAbovePlayers
+		Client.addChatMessage({255, 255, 128}, 'Overhead messages', State.DisplayMessagesAbovePlayers and 'on' or 'off')
+		SetResourceKvp('displayMessagesAbovePlayers', State.DisplayMessagesAbovePlayers and 'true' or 'false')
+	end, false)
+
+	RegisterCommand('toggletyping', function()
+		Client.toggleTypingDisplay()
+	end, false)
+
+	RegisterCommand('togglebubbles', function()
+		Client.toggleBubbleDisplay()
+	end, false)
+
+	AddEventHandler('poodlechat:globalMessage', function(id, license, name, color, message)
+		if isMutedLicense(license) then
+			return
+		end
+
+		addGlobalMessage(name, color, message)
+
+		if State.DisplayMessagesAbovePlayers then
+			Client.displayTextAbovePlayer(id, color, message)
+		end
+	end)
+
+	AddEventHandler('poodlechat:localMessage', function(id, license, name, color, message)
+		if isMutedLicense(license) then
+			return
+		end
+
+		if Client.isInProximity(id, State.LocalMessageDistance) then
+			addLocalMessage(name, color, message)
+
+			if State.DisplayMessagesAbovePlayers then
+				Client.displayTextAbovePlayer(id, color, message)
+			end
+		end
+	end)
+
+	AddEventHandler('poodlechat:action', function(id, license, name, message)
+		if isMutedLicense(license) then
+			return
+		end
+
+		if Client.isInProximity(id, State.ActionMessageDistance) then
+			Client.addChatMessage(State.ActionMessageColor, '^*' .. name .. '^r^* ' .. message)
+
+			if State.DisplayMessagesAbovePlayers then
+				Client.displayTextAbovePlayer(id, State.ActionMessageColor, '*' .. message .. '*')
+			end
+		end
+	end)
+
+	AddEventHandler('poodlechat:whisperEcho', function(_, license, name, message)
+		if isMutedLicense(license) then
+			Client.addChatMessage({255, 0, 0}, 'Error', name .. ' is muted')
+			return
+		end
+
+		Client.addChatMessage(State.WhisperEchoColor, '[Whisper@' .. name .. ']', message)
+
+		if State.DisplayMessagesAbovePlayers then
+			Client.displayTextAbovePlayer(GetPlayerServerId(PlayerId()), State.WhisperColor, message)
+		end
+	end)
+
+	AddEventHandler('poodlechat:whisper', function(id, license, name, message)
+		if isMutedLicense(license) then
+			return
+		end
+
+		Client.addChatMessage(State.WhisperColor, '[Whisper] ' .. name, message)
+
+		if State.DisplayMessagesAbovePlayers then
+			Client.displayTextAbovePlayer(id, State.WhisperColor, message)
+		end
+	end)
+
+	AddEventHandler('poodlechat:whisperError', function(id)
+		Client.addChatMessage({255, 0, 0}, 'Error', 'No user with ID or name ' .. tostring(id))
+	end)
+
+	RegisterCommand('reply', replyCommand, false)
+	RegisterCommand('r', replyCommand, false)
+
+	AddEventHandler('poodlechat:setReplyTo', function(id)
+		State.ReplyTo = tostring(id)
+	end)
+
+	RegisterCommand('togglechat', function()
+		State.HideChat = not State.HideChat
+	end)
+
+	RegisterCommand('staff', function(_, args)
+		local message = table.concat(args, ' ')
+
+		if message == '' then
+			return
+		end
+
+		TriggerServerEvent('poodlechat:staffMessage', message)
+	end)
+
+	AddEventHandler('poodlechat:staffMessage', function(id, name, color, message)
+		Client.addChatMessage(color, '[Staff] ' .. name, message)
+
+		if State.DisplayMessagesAbovePlayers then
+			Client.displayTextAbovePlayer(id, color, message)
+		end
+	end)
+
+	AddEventHandler('poodlechat:setPermissions', function(permissions)
+		State.Permissions = permissions
+
+		Client.sendNuiMessage({
+			type = 'setPermissions',
+			permissions = json.encode(permissions)
+		})
+	end)
+
+	RegisterCommand('report', function(_, args)
+		if #args < 2 then
+			Client.addChatMessage({255, 0, 0}, 'Error', 'You must specify a player and a reason')
+			return
+		end
+
+		local player = table.remove(args, 1)
+		local reason = table.concat(args, ' ')
+
+		TriggerServerEvent('poodlechat:report', player, reason)
+	end, false)
+
+	RegisterCommand('mute', function(_, args)
+		if #args < 1 then
+			Client.addChatMessage({255, 0, 0}, 'Error', 'You must specify a player to mute')
+			return
+		end
+
+		TriggerServerEvent('poodlechat:mute', args[1])
+	end, false)
+
+	AddEventHandler('poodlechat:mute', function(id, license)
+		local player = GetPlayerFromServerId(id)
+		local name = player ~= -1 and GetPlayerName(player) or tostring(id)
+
+		State.MutedPlayers[license] = name
+
+		Client.addChatMessage({255, 255, 128}, name .. ' was muted')
+		Client.encodeAndStore('mutedPlayers', State.MutedPlayers)
+	end)
+
+	RegisterCommand('unmute', function(_, args)
+		if #args < 1 then
+			Client.addChatMessage({255, 0, 0}, 'Error', 'You must specify a player to unmute')
+			return
+		end
+
+		TriggerServerEvent('poodlechat:unmute', args[1])
+	end)
+
+	AddEventHandler('poodlechat:unmute', function(id, license)
+		local player = GetPlayerFromServerId(id)
+		local name = player ~= -1 and GetPlayerName(player) or tostring(id)
+
+		State.MutedPlayers[license] = nil
+
+		Client.addChatMessage({255, 255, 128}, name .. ' was unmuted')
+		Client.encodeAndStore('mutedPlayers', State.MutedPlayers)
+	end)
+
+	RegisterCommand('muted', function()
+		TriggerServerEvent('poodlechat:showMuted', State.MutedPlayers)
+	end)
+
+	AddEventHandler('poodlechat:showMuted', function(mutedPlayerIds)
+		local muted = {}
+
+		table.sort(mutedPlayerIds)
+
+		for _, id in ipairs(mutedPlayerIds) do
+			local player = GetPlayerFromServerId(id)
+			local name = player ~= -1 and GetPlayerName(player) or tostring(id)
+			muted[#muted + 1] = string.format('%s [%d]', name, id)
+		end
+
+		if #muted == 0 then
+			Client.addChatMessage({255, 255, 128}, 'No players are muted')
+		else
+			Client.addChatMessage({255, 255, 128}, 'Muted', table.concat(muted, ', '))
+		end
+	end)
+
+	handlersRegistered = true
+end
+
 Client.isMutedLicense = isMutedLicense
 Client.sendSuggestionBatch = sendSuggestionBatch
-Client.SetChannel = SetChannel
-Client.CycleChannel = CycleChannel
-Client.LoadSavedSettings = LoadSavedSettings
+Client.SetChannel = setChannel
+Client.CycleChannel = cycleChannel
+Client.LoadSavedSettings = loadSavedSettings
 Client.registerStartupSuggestions = registerStartupSuggestions
 Client.refreshCommands = refreshCommands
 Client.refreshThemes = refreshThemes
 Client.buildOnLoadPayload = buildOnLoadPayload
-
+Client.registerChatHandlers = registerChatHandlers

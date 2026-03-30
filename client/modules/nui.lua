@@ -1,269 +1,293 @@
 local Client = PoodleChatClient
-local State = Client.state
-local constants = Client.constants
+local handlersRegistered = false
 
-AddEventHandler('chatMessage', function(author, color, text)
-	local args = {text}
+local function ensureContext()
+	local state = Client and Client.state or nil
+	local constants = Client and Client.constants or nil
 
-	if author ~= '' then
-		table.insert(args, 1, author)
+	if not state or not constants then
+		return nil, nil
 	end
 
-	Client.sendNuiMessage({
-		type = 'ON_MESSAGE',
-		message = {
-			color = color,
-			multiline = true,
-			args = args
-		}
-	})
-end)
+	return state, constants
+end
 
-AddEventHandler('__cfx_internal:serverPrint', function(msg)
-	print(msg)
-
-	Client.sendNuiMessage({
-		type = 'ON_MESSAGE',
-		message = {
-			templateId = 'print',
-			multiline = true,
-			args = {msg}
-		}
-	})
-end)
-
-AddEventHandler('chat:addMessage', function(message)
-	Client.sendNuiMessage({
-		type = 'ON_MESSAGE',
-		message = message
-	})
-end)
-
-AddEventHandler('chat:addSuggestion', function(name, help, params)
-	Client.sendNuiMessage({
-		type = 'ON_SUGGESTION_ADD',
-		suggestion = {
-			name = name,
-			help = help,
-			params = params or nil
-		}
-	})
-end)
-
-AddEventHandler('chat:addSuggestions', function(suggestions)
-	if type(suggestions) ~= 'table' or #suggestions == 0 then
+local function registerNuiHandlers()
+	if handlersRegistered then
 		return
 	end
 
-	Client.sendSuggestionBatch(suggestions)
-end)
+	local state, constants = ensureContext()
+	if not state or not constants then
+		return
+	end
 
-AddEventHandler('chat:removeSuggestion', function(name)
-	Client.sendNuiMessage({
-		type = 'ON_SUGGESTION_REMOVE',
-		name = name
-	})
-end)
+	AddEventHandler('chatMessage', function(author, color, text)
+		local args = {text}
 
-AddEventHandler('chat:addTemplate', function(id, html)
-	Client.sendNuiMessage({
-		type = 'ON_TEMPLATE_ADD',
-		template = {
-			id = id,
-			html = html
-		}
-	})
-end)
-
-AddEventHandler('chat:clear', function()
-	Client.sendNuiMessage({
-		type = 'ON_CLEAR'
-	})
-end)
-
-RegisterNUICallback('chatResult', function(data, cb)
-	State.chatInputActive = false
-	SetNuiFocus(false, false)
-	Client.setLocalTypingState(false, true)
-
-	if not data.canceled then
-		local playerId = PlayerId()
-		local r, g, b = 0, 0x99, 255
-
-		if data.message:sub(1, 1) == '/' then
-			ExecuteCommand(data.message:sub(2))
-		else
-			TriggerServerEvent('_chat:messageEntered', GetPlayerName(playerId), {r, g, b}, data.message, State.Channel)
+		if author ~= '' then
+			table.insert(args, 1, author)
 		end
-	end
 
-	cb('ok')
-end)
+		Client.sendNuiMessage({
+			type = 'ON_MESSAGE',
+			message = {
+				color = color,
+				multiline = true,
+				args = args
+			}
+		})
+	end)
 
-RegisterNUICallback('typingState', function(data, cb)
-	Client.setLocalTypingState(type(data) == 'table' and data.active == true, false)
-	cb({})
-end)
+	AddEventHandler('__cfx_internal:serverPrint', function(msg)
+		print(msg)
 
-RegisterNUICallback('cycleDistance', function(_, cb)
-	local ok = Client.cycleDistance()
-	cb({ok = ok, state = State.distanceState})
-end)
+		Client.sendNuiMessage({
+			type = 'ON_MESSAGE',
+			message = {
+				templateId = 'print',
+				multiline = true,
+				args = {msg}
+			}
+		})
+	end)
 
-RegisterNUICallback('toggleTypingDisplay', function(_, cb)
-	local current = Client.toggleTypingDisplay()
-	cb({active = current})
-end)
+	AddEventHandler('chat:addMessage', function(message)
+		Client.sendNuiMessage({
+			type = 'ON_MESSAGE',
+			message = message
+		})
+	end)
 
-RegisterNUICallback('toggleBubbleDisplay', function(_, cb)
-	local current = Client.toggleBubbleDisplay()
-	cb({active = current})
-end)
+	AddEventHandler('chat:addSuggestion', function(name, help, params)
+		Client.sendNuiMessage({
+			type = 'ON_SUGGESTION_ADD',
+			suggestion = {
+				name = name,
+				help = help,
+				params = params or nil
+			}
+		})
+	end)
 
-RegisterNUICallback('setChannel', function(data, cb)
-	local name = type(data) == 'table' and constants.channelNameById[data.channelId] or nil
-	if name then
-		SetChannel(name)
-	end
-	cb({})
-end)
+	AddEventHandler('chat:addSuggestions', function(suggestions)
+		if type(suggestions) ~= 'table' or #suggestions == 0 then
+			return
+		end
 
-RegisterNUICallback('cycleChannel', function(_, cb)
-	CycleChannel()
-	cb({})
-end)
+		Client.sendSuggestionBatch(suggestions)
+	end)
 
-RegisterNUICallback('loaded', function(_, cb)
-	TriggerServerEvent('chat:init')
-	Client.refreshCommands()
-	Client.refreshThemes()
-	State.chatLoaded = true
-	Client.sendFeatureState()
-	Client.refreshDistanceState(true)
-	Client.refreshDistanceModeCount()
-	cb('ok')
-end)
+	AddEventHandler('chat:removeSuggestion', function(name)
+		Client.sendNuiMessage({
+			type = 'ON_SUGGESTION_REMOVE',
+			name = name
+		})
+	end)
 
-RegisterNUICallback('onLoad', function(_, cb)
-	cb(Client.buildOnLoadPayload())
-end)
+	AddEventHandler('chat:addTemplate', function(id, html)
+		Client.sendNuiMessage({
+			type = 'ON_TEMPLATE_ADD',
+			template = {
+				id = id,
+				html = html
+			}
+		})
+	end)
 
-RegisterNUICallback('getEmojiPanelData', function(_, cb)
-	cb(Client.getEmojiPanelData())
-end)
+	AddEventHandler('chat:clear', function()
+		Client.sendNuiMessage({
+			type = 'ON_CLEAR'
+		})
+	end)
 
-RegisterNUICallback('useEmoji', function(data, cb)
-	local payload = Client.handleEmojiUse(type(data) == 'table' and data.emoji or nil)
-	cb(payload)
-end)
-
-AddEventHandler('onClientResourceStart', function(resName)
-	if resName ~= GetCurrentResourceName() then
-		return
-	end
-
-	SetTextChatEnabled(false)
-	SetNuiFocus(false, false)
-	Wait(constants.resourceRefreshDelayMs)
-	Client.refreshCommands()
-	Client.refreshThemes()
-end)
-
-AddEventHandler('onClientResourceStart', function(resName)
-	if resName ~= 'pma-voice' then
-		return
-	end
-
-	if not State.distanceEnabled then
-		return
-	end
-
-	Wait(constants.pmaStartDelayMs)
-	Client.refreshDistanceModeCount()
-	Client.refreshDistanceState(true)
-end)
-
-AddEventHandler('onClientResourceStop', function(resName)
-	Wait(constants.resourceRefreshDelayMs)
-	Client.refreshCommands()
-	Client.refreshThemes()
-
-	if resName == GetCurrentResourceName() then
+	RegisterNUICallback('chatResult', function(data, cb)
+		state.chatInputActive = false
+		SetNuiFocus(false, false)
 		Client.setLocalTypingState(false, true)
-	end
-end)
 
-CreateThread(function()
-	SetTextChatEnabled(false)
-	SetNuiFocus(false, false)
-	TriggerServerEvent('poodlechat:getPermissions')
+		if not data.canceled then
+			local playerId = PlayerId()
+			local r, g, b = 0, 0x99, 255
 
-	local okLoadSaved, loadSavedError = pcall(LoadSavedSettings)
-	if not okLoadSaved then
-		print(('[poodlechat] Failed to load saved settings: %s'):format(tostring(loadSavedError)))
-	end
+			if data.message:sub(1, 1) == '/' then
+				ExecuteCommand(data.message:sub(2))
+			else
+				TriggerServerEvent('_chat:messageEntered', GetPlayerName(playerId), {r, g, b}, data.message, state.Channel)
+			end
+		end
 
-	local okParseEmojiDataset, parseEmojiDatasetError = pcall(Client.parseEmojiDataset)
-	if not okParseEmojiDataset then
-		print(('[poodlechat] Failed to parse emoji dataset: %s'):format(tostring(parseEmojiDatasetError)))
-	end
+		cb('ok')
+	end)
 
-	Client.registerStartupSuggestions()
+	RegisterNUICallback('typingState', function(data, cb)
+		Client.setLocalTypingState(type(data) == 'table' and data.active == true, false)
+		cb({})
+	end)
 
-	local okEmojiSuggestions, emojiSuggestionsError = pcall(AddEmojiSuggestions)
-	if not okEmojiSuggestions then
-		print(('[poodlechat] Failed to register emoji suggestions: %s'):format(tostring(emojiSuggestionsError)))
-	end
+	RegisterNUICallback('cycleDistance', function(_, cb)
+		local ok = Client.cycleDistance()
+		cb({ok = ok, state = state.distanceState})
+	end)
 
-	Client.sendFeatureState()
-	Client.refreshDistanceState(true)
+	RegisterNUICallback('toggleTypingDisplay', function(_, cb)
+		local current = Client.toggleTypingDisplay()
+		cb({active = current})
+	end)
 
-	while true do
-		local waitMs = constants.mainLoopIdleMs
+	RegisterNUICallback('toggleBubbleDisplay', function(_, cb)
+		local current = Client.toggleBubbleDisplay()
+		cb({active = current})
+	end)
 
-		if not State.chatInputActive then
-			if IsControlPressed(0, constants.chatOpenControl) then
-				State.chatInputActive = true
-				State.chatInputActivating = true
+	RegisterNUICallback('setChannel', function(data, cb)
+		local name = type(data) == 'table' and constants.channelNameById[data.channelId] or nil
+		if name then
+			Client.SetChannel(name)
+		end
+		cb({})
+	end)
 
-				Client.sendNuiMessage({
-					type = 'ON_OPEN'
-				})
+	RegisterNUICallback('cycleChannel', function(_, cb)
+		Client.CycleChannel()
+		cb({})
+	end)
 
+	RegisterNUICallback('loaded', function(_, cb)
+		TriggerServerEvent('chat:init')
+		Client.refreshCommands()
+		Client.refreshThemes()
+		state.chatLoaded = true
+		Client.sendFeatureState()
+		Client.refreshDistanceState(true)
+		Client.refreshDistanceModeCount()
+		cb('ok')
+	end)
+
+	RegisterNUICallback('onLoad', function(_, cb)
+		cb(Client.buildOnLoadPayload())
+	end)
+
+	RegisterNUICallback('getEmojiPanelData', function(_, cb)
+		cb(Client.getEmojiPanelData())
+	end)
+
+	RegisterNUICallback('useEmoji', function(data, cb)
+		local payload = Client.handleEmojiUse(type(data) == 'table' and data.emoji or nil)
+		cb(payload)
+	end)
+
+	AddEventHandler('onClientResourceStart', function(resName)
+		if resName ~= GetCurrentResourceName() then
+			return
+		end
+
+		SetTextChatEnabled(false)
+		SetNuiFocus(false, false)
+		Wait(constants.resourceRefreshDelayMs)
+		Client.refreshCommands()
+		Client.refreshThemes()
+	end)
+
+	AddEventHandler('onClientResourceStart', function(resName)
+		if resName ~= 'pma-voice' then
+			return
+		end
+
+		if not state.distanceEnabled then
+			return
+		end
+
+		Wait(constants.pmaStartDelayMs)
+		Client.refreshDistanceModeCount()
+		Client.refreshDistanceState(true)
+	end)
+
+	AddEventHandler('onClientResourceStop', function(resName)
+		Wait(constants.resourceRefreshDelayMs)
+		Client.refreshCommands()
+		Client.refreshThemes()
+
+		if resName == GetCurrentResourceName() then
+			Client.setLocalTypingState(false, true)
+		end
+	end)
+
+	CreateThread(function()
+		SetTextChatEnabled(false)
+		SetNuiFocus(false, false)
+		TriggerServerEvent('poodlechat:getPermissions')
+
+		local okLoadSaved, loadSavedError = pcall(Client.LoadSavedSettings)
+		if not okLoadSaved then
+			print(('[poodlechat] Failed to load saved settings: %s'):format(tostring(loadSavedError)))
+		end
+
+		local okParseEmojiDataset, parseEmojiDatasetError = pcall(Client.parseEmojiDataset)
+		if not okParseEmojiDataset then
+			print(('[poodlechat] Failed to parse emoji dataset: %s'):format(tostring(parseEmojiDatasetError)))
+		end
+
+		Client.registerStartupSuggestions()
+
+		local okEmojiSuggestions, emojiSuggestionsError = pcall(Client.AddEmojiSuggestions)
+		if not okEmojiSuggestions then
+			print(('[poodlechat] Failed to register emoji suggestions: %s'):format(tostring(emojiSuggestionsError)))
+		end
+
+		Client.sendFeatureState()
+		Client.refreshDistanceState(true)
+
+		while true do
+			local waitMs = constants.mainLoopIdleMs
+
+			if not state.chatInputActive then
+				if IsControlPressed(0, constants.chatOpenControl) then
+					state.chatInputActive = true
+					state.chatInputActivating = true
+
+					Client.sendNuiMessage({
+						type = 'ON_OPEN'
+					})
+
+					waitMs = 0
+				end
+			elseif IsControlJustReleased(0, constants.chatOpenControl) then
+				SetNuiFocus(true, true)
 				waitMs = 0
 			end
-		elseif IsControlJustReleased(0, constants.chatOpenControl) then
-			SetNuiFocus(true, true)
-			waitMs = 0
-		end
 
-		if State.chatInputActivating then
-			if not IsControlPressed(0, constants.chatOpenControl) then
-				SetNuiFocus(true, true)
-				State.chatInputActivating = false
+			if state.chatInputActivating then
+				if not IsControlPressed(0, constants.chatOpenControl) then
+					SetNuiFocus(true, true)
+					state.chatInputActivating = false
+				end
+				waitMs = 0
 			end
-			waitMs = 0
-		end
 
-		if State.chatLoaded then
-			local shouldBeHidden = IsScreenFadedOut() or IsPauseMenuActive() or State.HideChat
+			if state.chatLoaded then
+				local shouldBeHidden = IsScreenFadedOut() or IsPauseMenuActive() or state.HideChat
 
-			if (shouldBeHidden and not State.chatHidden) or (not shouldBeHidden and State.chatHidden) then
-				State.chatHidden = shouldBeHidden
+				if (shouldBeHidden and not state.chatHidden) or (not shouldBeHidden and state.chatHidden) then
+					state.chatHidden = shouldBeHidden
 
-				Client.sendNuiMessage({
-					type = 'ON_SCREEN_STATE_CHANGE',
-					shouldHide = shouldBeHidden
-				})
+					Client.sendNuiMessage({
+						type = 'ON_SCREEN_STATE_CHANGE',
+						shouldHide = shouldBeHidden
+					})
+				end
 			end
+
+			if state.typingSystemEnabled and state.localTypingActive then
+				Client.setLocalTypingState(true, false)
+				waitMs = 0
+			end
+
+			Wait(waitMs)
 		end
+	end)
 
-		if State.typingSystemEnabled and State.localTypingActive then
-			Client.setLocalTypingState(true, false)
-			waitMs = 0
-		end
+	handlersRegistered = true
+end
 
-		Wait(waitMs)
-	end
-end)
-
+Client.registerNuiHandlers = registerNuiHandlers
