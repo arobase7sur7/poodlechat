@@ -1,20 +1,19 @@
 fx_version "cerulean"
-games {"gta5", "rdr3"}
-rdr3_warning "I acknowledge that this is a prerelease build of RedM, and I am aware my resources *will* become incompatible once RedM ships."
+games {"gta5"}
 
 name "PoodleChat"
-description "Chat resource used on Poodle's Palace FiveM and RedM servers"
-author "kibukj"
+description "Chat resource optimized and reworked"
+author "kibukj (made the original version), arobase7sur7 "
 repository "https://github.com/kibook/poodlechat"
-
-dependency "discord_rest" -- https://github.com/kibook/discord_rest
 
 files {
 	"html/index.html",
 	"html/index.css",
-	"html/config.default.js",
-	"html/config.js",
-	"html/App.js",
+	"html/emojibase.json",
+	"html/js/core.js",
+	"html/js/emoji.js",
+	"html/js/widgets.js",
+	"html/js/app.js",
 	"html/Message.js",
 	"html/Suggestions.js",
 	"html/vendor/vue.2.3.3.min.js",
@@ -33,16 +32,22 @@ ui_page "html/index.html"
 
 shared_scripts {
 	"shared/config.lua",
-	"shared/emoji.lua"
+	"shared/emoji_utils.lua"
 }
 
 client_scripts {
-	"client/config.lua",
-	"client/client.lua"
+	"client/client.lua",
+	"client/modules/bootstrap.lua",
+	"client/modules/emoji.lua",
+	"client/modules/chat.lua",
+	"client/modules/features.lua",
+	"client/modules/nui.lua"
 }
 
 server_scripts {
-	"server/config.lua",
-	"server/common.lua",
-	"server/server.lua"
+	"server/server.lua",
+	"server/modules/bootstrap.lua",
+	"server/modules/emoji.lua",
+	"server/modules/chat.lua",
+	"server/modules/moderation.lua"
 }

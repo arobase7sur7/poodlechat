@@ -9,15 +9,12 @@
   <link href="index.css" rel="stylesheet"></link>
 
   <script src="vendor/vue.2.3.3.min.js" type="text/javascript"></script>
-  <script src="config.default.js" type="text/javascript"></script>
-  <script src="config.js" type="text/javascript"></script>
 </head>
 <body>
   <div id="app"></div>
 
-  <!-- App Template -->
   <script type="text/x-template" id="app_template">
-    <div id="app" @keyup.esc="hideInput">
+    <div id="chat-root" @keyup.esc="hideInput">
       <div class="chat-window" :style="this.style" :class="{ 'fadeOut animated': !showWindow, 'hidden': shouldHide }">
         <div class="chat-messages" ref="messages">
           <message v-for="msg in messages"
@@ -32,15 +29,52 @@
         </div>
       </div>
       <div class="chat-input" v-show="showInput">
-        <div>
-					<div class="channels">
-						<div class="channel tab active-tab" id="channel-local">Local</div>
-						<div class="channel tab" id="channel-global">Global</div>
-						<div class="channel tab" id="channel-staff">Staff</div>
-						<div class="tab" id="cycle-instructions">(Press Tab to cycle)</div>
-						<div class="tab" id="emoji-toggle">😀</div>
-					</div>
-					<div class="prefix">➤</div>
+        <div class="input-shell">
+          <div class="chat-header">
+            <div class="channels">
+              <div class="channel tab active-tab" id="channel-local">Local</div>
+              <div class="channel tab" id="channel-global">Global</div>
+              <div class="channel tab" id="channel-staff">Staff</div>
+              <div class="tab" id="cycle-instructions">Tab</div>
+              <div class="tab" id="emoji-toggle">😀</div>
+            </div>
+            <div class="control-rail">
+              <button class="tool-btn icon-btn no-focus" id="distance-widget" type="button" tabindex="-1" title="Cycle distance">
+                <span class="btn-icon" aria-hidden="true">
+                  <svg class="tool-svg" viewBox="0 0 24 24" focusable="false">
+                    <path d="M4 10h4l5-4v12l-5-4H4z"></path>
+                    <path d="M16 9.5a4.5 4.5 0 0 1 0 5"></path>
+                    <path d="M18.8 7a8 8 0 0 1 0 10"></path>
+                  </svg>
+                </span>
+                <span class="distance-meter" aria-hidden="true">
+                  <svg class="meter-svg" viewBox="0 0 100 10" preserveAspectRatio="none" focusable="false">
+                    <rect class="meter-track" x="0" y="0" width="100" height="10" rx="5"></rect>
+                    <rect id="distance-fill" class="meter-fill" x="0" y="0" width="0" height="10" rx="5"></rect>
+                  </svg>
+                </span>
+                <span id="distance-label" class="distance-label">Distance</span>
+              </button>
+              <button class="tool-btn icon-btn no-focus" id="typing-toggle" type="button" tabindex="-1" title="Toggle typing indicator">
+                <span class="btn-icon" aria-hidden="true">
+                  <svg class="tool-svg" viewBox="0 0 24 24" focusable="false">
+                    <rect x="4" y="7" width="16" height="10" rx="5"></rect>
+                    <circle cx="9" cy="12" r="1.2"></circle>
+                    <circle cx="12" cy="12" r="1.2"></circle>
+                    <circle cx="15" cy="12" r="1.2"></circle>
+                  </svg>
+                </span>
+              </button>
+              <button class="tool-btn icon-btn no-focus" id="bubbles-toggle" type="button" tabindex="-1" title="Toggle bubbles">
+                <span class="btn-icon" aria-hidden="true">
+                  <svg class="tool-svg" viewBox="0 0 24 24" focusable="false">
+                    <path d="M4 5h16v10H9l-5 4v-4H4z"></path>
+                  </svg>
+                </span>
+              </button>
+            </div>
+          </div>
+          <div class="prefix">➤</div>
           <textarea v-model="message"
                     ref="input"
                     type="text"
@@ -51,24 +85,22 @@
                     @keypress.enter.prevent="send">
           </textarea>
         </div>
-        <suggestions :message="message" :suggestions="suggestions">
-        </suggestions>
-				<div id="emoji-window">
-					<input id="emoji-search" type="text" placeholder="Search..." tabindex="-1">
-					<div id="emoji-list" class="no-focus" tabindex="-1"></div>
-				</div>
+        <suggestions :message="message" :suggestions="suggestions"></suggestions>
+        <div id="emoji-window">
+          <div id="emoji-tabs" class="no-focus" tabindex="-1"></div>
+          <input id="emoji-search" type="text" placeholder="Search..." tabindex="-1">
+          <div id="emoji-list" class="no-focus" tabindex="-1"></div>
+        </div>
       </div>
     </div>
   </script>
 
-  <!-- Message Template -->
   <script type="text/x-template" id="message_template">
     <div class="msg" :class="{ multiline }">
       <span v-html="textEscaped"></span>
     </div>
   </script>
 
-  <!-- Suggestions Template -->
   <script type="text/x-template" id="suggestions_template">
     <div class="suggestions-wrap" v-show="currentSuggestions.length > 0">
       <ul class="suggestions">
@@ -96,12 +128,13 @@
     </div>
   </script>
 
-  <!-- Scripts -->
-  <script type="text/javascript" src="./Suggestions.js"></script>
+  <script type="text/javascript" src="./js/core.js"></script>
+  <script type="text/javascript" src="./js/emoji.js"></script>
+  <script type="text/javascript" src="./js/widgets.js"></script>
   <script type="text/javascript" src="./Message.js"></script>
-  <script type="text/javascript" src="./App.js"></script>
+  <script type="text/javascript" src="./Suggestions.js"></script>
+  <script type="text/javascript" src="./js/app.js"></script>
 
-  <!-- Main Entry -->
   <script type="text/javascript">
   window.post = (url, data) => {
     var request = new XMLHttpRequest();
@@ -123,7 +156,6 @@
   };
   </script>
 
-  <div id="message3d" tabindex="-1" disabled></div>
-
+  <div id="message3d" tabindex="-1"></div>
 </body>
 </html>

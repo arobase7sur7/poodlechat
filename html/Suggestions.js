@@ -1,44 +1,56 @@
+function getSuggestionLimit() {
+	const config = window.PoodleChatUiConfig || {};
+	const limit = Number(config.suggestionLimit);
+	if (Number.isFinite(limit) && limit > 0) {
+		return Math.floor(limit);
+	}
+	return 5;
+}
+
 Vue.component('suggestions', {
-  template: '#suggestions_template',
-  props: ['message', 'suggestions'],
-  data() {
-    return {};
-  },
-  computed: {
-    currentSuggestions() {
-      if (this.message === '') {
-        return [];
-      }
-      const currentSuggestions = this.suggestions.filter((s) => {
-        if (!s.name.startsWith(this.message)) {
-          const suggestionSplitted = s.name.split(' ');
-          const messageSplitted = this.message.split(' ');
-          for (let i = 0; i < messageSplitted.length; i += 1) {
-            if (i >= suggestionSplitted.length) {
-              return i < suggestionSplitted.length + s.params.length;
-            }
-            if (suggestionSplitted[i] !== messageSplitted[i]) {
-              return false;
-            }
-          }
-        }
-        return true;
-      }).slice(0, CONFIG.suggestionLimit);
+	template: '#suggestions_template',
+	props: ['message', 'suggestions'],
+	data() {
+		return {};
+	},
+	computed: {
+		currentSuggestions() {
+			if (this.message === '') {
+				return [];
+			}
 
-      currentSuggestions.forEach((s) => {
-        // eslint-disable-next-line no-param-reassign
-        s.disabled = !s.name.startsWith(this.message);
+			const filtered = this.suggestions
+				.filter((suggestion) => {
+					if (!suggestion.name.startsWith(this.message)) {
+						const suggestionSplit = suggestion.name.split(' ');
+						const messageSplit = this.message.split(' ');
 
-        s.params.forEach((p, index) => {
-          const wType = (index === s.params.length - 1) ? '.' : '\\S';
-          const regex = new RegExp(`${s.name} (?:\\w+ ){${index}}(?:${wType}*)$`, 'g');
+						for (let i = 0; i < messageSplit.length; i += 1) {
+							if (i >= suggestionSplit.length) {
+								return i < suggestionSplit.length + suggestion.params.length;
+							}
+							if (suggestionSplit[i] !== messageSplit[i]) {
+								return false;
+							}
+						}
+					}
+					return true;
+				})
+				.slice(0, getSuggestionLimit())
+				.map((suggestion) => ({
+					...suggestion,
+					disabled: !suggestion.name.startsWith(this.message),
+					params: (suggestion.params || []).map((param, index) => {
+						const wType = index === suggestion.params.length - 1 ? '.' : '\\S';
+						const regex = new RegExp(`${suggestion.name} (?:\\w+ ){${index}}(?:${wType}*)$`, 'g');
+						return {
+							...param,
+							disabled: this.message.match(regex) == null
+						};
+					})
+				}));
 
-          // eslint-disable-next-line no-param-reassign
-          p.disabled = this.message.match(regex) == null;
-        });
-      });
-      return currentSuggestions;
-    },
-  },
-  methods: {},
+			return filtered;
+		}
+	}
 });
