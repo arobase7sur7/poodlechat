@@ -4,7 +4,7 @@ games {"gta5"}
 name "PoodleChat"
 description "Chat resource optimized and reworked"
 author "kibukj (made the original version), arobase7sur7 "
-repository "https://github.com/kibook/poodlechat"
+repository "https://github.com/arobase7sur7/poodlechat"
 
 files {
 	"html/index.html",
@@ -14,7 +14,6 @@ files {
 	"html/js/core.js",
 	"html/js/emoji.js",
 	"html/js/widgets.js",
-	"html/js/app.js",
 	"html/js/ui_runtime.js",
 	"html/Message.js",
 	"html/Suggestions.js",

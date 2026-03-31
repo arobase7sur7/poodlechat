@@ -31,18 +31,12 @@ local function sendReportToDiscord(source, target, reason)
 
 	Server.sendDiscordWebhook('report', source, Server.getName(source), message, reportColor, function(ok, statusCode, body)
 		if ok then
-			TriggerClientEvent('chat:addMessage', source, {
-				color = feedbackColor,
-				args = {successMessage}
-			})
+			Server.sendSystemMessage(source, successMessage, feedbackColor, constants.DefaultChannelId)
 			return
 		end
 
 		Server.log('error', ('Failed to send report (%s): %s'):format(tostring(statusCode), tostring(body)))
-		TriggerClientEvent('chat:addMessage', source, {
-			color = feedbackColor,
-			args = {failureMessage}
-		})
+		Server.sendSystemMessage(source, failureMessage, feedbackColor, constants.DefaultChannelId)
 	end)
 end
 
@@ -57,19 +51,13 @@ local function registerModerationHandlers()
 
 	AddEventHandler('poodlechat:report', function(player, reason)
 		if not Server.isDiscordKindEnabled('report') then
-			TriggerClientEvent('chat:addMessage', source, {
-				color = {255, 0, 0},
-				args = {'Error', 'The report function is not enabled.'}
-			})
+			Server.sendSystemMessage(source, 'The report function is not enabled.', {255, 0, 0}, constants.DefaultChannelId)
 			return
 		end
 
 		local id = Server.getPlayerId(player)
 		if not id then
-			TriggerClientEvent('chat:addMessage', source, {
-				color = {255, 0, 0},
-				args = {'Error', 'No player with ID or name ' .. tostring(player) .. ' exists'}
-			})
+			Server.sendSystemMessage(source, 'No player with ID or name ' .. tostring(player) .. ' exists', {255, 0, 0}, constants.DefaultChannelId)
 			return
 		end
 
@@ -84,16 +72,10 @@ local function registerModerationHandlers()
 			if license then
 				TriggerClientEvent('poodlechat:mute', source, id, license)
 			else
-				TriggerClientEvent('chat:addMessage', source, {
-					color = {255, 0, 0},
-					args = {'Error', 'Failed to mute player'}
-				})
+				Server.sendSystemMessage(source, 'Failed to mute player', {255, 0, 0}, constants.DefaultChannelId)
 			end
 		else
-			TriggerClientEvent('chat:addMessage', source, {
-				color = {255, 0, 0},
-				args = {'Error', 'No player with ID or name ' .. tostring(player) .. ' exists'}
-			})
+			Server.sendSystemMessage(source, 'No player with ID or name ' .. tostring(player) .. ' exists', {255, 0, 0}, constants.DefaultChannelId)
 		end
 	end)
 
@@ -104,10 +86,7 @@ local function registerModerationHandlers()
 			local license = Server.getIdFromSource(constants.IdentifierType, id)
 			TriggerClientEvent('poodlechat:unmute', source, id, license)
 		else
-			TriggerClientEvent('chat:addMessage', source, {
-				color = {255, 0, 0},
-				args = {'Error', 'No player with ID or name ' .. tostring(player) .. ' exists'}
-			})
+			Server.sendSystemMessage(source, 'No player with ID or name ' .. tostring(player) .. ' exists', {255, 0, 0}, constants.DefaultChannelId)
 		end
 	end)
 

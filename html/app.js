@@ -6,6 +6,21 @@ function uiRuntimeValue(key, fallback) {
 	}
 	return fallback;
 }
+
+function normalizeLimit(value, fallback) {
+	const parsed = Number(value);
+	if (Number.isFinite(parsed)) {
+		if (parsed < 0) {
+			return -1;
+		}
+		if (parsed === 0) {
+			return Math.max(1, Number(fallback) || 1);
+		}
+		return Math.floor(parsed);
+	}
+	return Math.max(1, Number(fallback) || 1);
+}
+
 window.APP = {
 	template: '#app_template',
 	name: 'app',
@@ -19,7 +34,32 @@ window.APP = {
 			removedSuggestions: [],
 			templates: { ...getRuntimeUiConfig().templates },
 			message: '',
-			messages: [],
+			channels: [],
+			messagesByChannel: {},
+			unreadByChannel: {},
+			activeChannelId: '',
+			separateChannelTabs: true,
+			singleChannelId: 'local',
+			whisperTabEnabled: true,
+			whisperFallbackChannel: 'local',
+			whisperConversations: {},
+			hiddenWhisperConversations: {},
+			activeWhisperConversationId: null,
+			whisperPickerOpen: false,
+			whisperTargets: [],
+			whisperSidebarCollapsible: true,
+			whisperSidebarCollapsed: false,
+			autoScrollEnabled: true,
+			myServerId: 0,
+			whisperNotificationVolume: 0.65,
+			nextMessageId: 1,
+			whisperLimits: {
+				maxConversations: 30,
+				maxMessagesPerConversation: 80,
+				defaultConversationMode: 'active-only',
+				separateWhisperTab: true,
+				fallbackChannel: 'local'
+			},
 			oldMessages: [],
 			oldMessagesIndex: -1,
 			tplBackups: [],
@@ -32,6 +72,8 @@ window.APP = {
 			featureState: {
 				typing: { enabled: false, allowToggle: false, active: false },
 				bubbles: { enabled: false, allowToggle: false, active: false },
+				autoScroll: { enabled: true, allowToggle: true, active: true },
+				whisperSound: { enabled: true, allowToggle: true, active: true, volume: 0.65 },
 				distance: { enabled: false }
 			}
 		};
@@ -60,27 +102,92 @@ window.APP = {
 		window.addEventListener('message', this.listener);
 	},
 	watch: {
-		messages() {
-			if (this.showWindowTimer) {
-				clearTimeout(this.showWindowTimer);
-			}
-			this.showWindow = true;
-			this.resetShowWindowTimer();
-
-			const messagesObj = this.$refs.messages;
-			this.$nextTick(() => {
-				if (messagesObj) {
-					messagesObj.scrollTop = messagesObj.scrollHeight;
-				}
-			});
-		},
 		message() {
 			this.syncTypingState(false);
+		},
+		activeChannelId() {
+			if (!this.separateChannelTabs) {
+				const single = this.singleAllowedChannelId();
+				if (single && this.activeChannelId !== single) {
+					this.setChannel({ channelId: single });
+					return;
+				}
+			}
+			if (this.activeChannelId === 'whispers' && this.whisperTabEnabled && !this.activeWhisperConversationId) {
+				const first = this.whisperConversationList[0];
+				if (first) {
+					this.activeWhisperConversationId = first.id;
+				}
+			}
+			if (this.activeChannelId !== 'whispers') {
+				this.whisperPickerOpen = false;
+			}
+			this.$nextTick(() => this.scrollActiveMessages(false));
 		}
 	},
 	computed: {
 		suggestions() {
 			return this.backingSuggestions.filter((el) => this.removedSuggestions.indexOf(el.name) <= -1);
+		},
+		visibleChannels() {
+			const sorted = this.channels
+				.filter((channel) => channel.visible !== false && channel.allowed !== false)
+				.sort((a, b) => {
+					if (a.order === b.order) {
+						return String(a.id).localeCompare(String(b.id));
+					}
+					return a.order - b.order;
+				});
+			if (this.separateChannelTabs) {
+				return sorted;
+			}
+			const preferred = sorted.find((channel) => channel.id === this.singleChannelId);
+			if (preferred) {
+				return [preferred];
+			}
+			return sorted.length > 0 ? [sorted[0]] : [];
+		},
+		currentMessages() {
+			return this.messagesByChannel[this.activeChannelId] || [];
+		},
+		isWhispersActive() {
+			return this.whisperTabEnabled && this.activeChannelId === 'whispers';
+		},
+		whisperConversationList() {
+			return Object.values(this.whisperConversations)
+				.filter((conversation) => this.hiddenWhisperConversations[conversation.id] !== true)
+				.sort((a, b) => {
+					if (a.lastAt === b.lastAt) {
+						return String(a.id).localeCompare(String(b.id));
+					}
+					return b.lastAt - a.lastAt;
+				})
+				.map((conversation) => {
+					const peerId = Number(conversation.peerId);
+					let peerShortId = '';
+					if (Number.isFinite(peerId) && peerId > 0) {
+						peerShortId = String(Math.floor(peerId));
+					} else {
+						peerShortId = String(conversation.id || '').replace(/^id:/, '') || 'DM';
+					}
+					return {
+						...conversation,
+						peerShortId
+					};
+				});
+		},
+		hasWhisperUnreadDot() {
+			return Object.values(this.whisperConversations).some((conversation) => Number(conversation.unread) > 0);
+		},
+		isWhisperSidebarCollapsed() {
+			return this.whisperSidebarCollapsible && this.whisperSidebarCollapsed;
+		},
+		activeWhisperMessages() {
+			if (!this.activeWhisperConversationId) {
+				return [];
+			}
+			const conversation = this.whisperConversations[this.activeWhisperConversationId];
+			return conversation ? conversation.messages : [];
 		}
 	},
 	methods: {
@@ -92,10 +199,7 @@ window.APP = {
 		},
 		ON_OPEN() {
 			this.showInput = true;
-			this.showWindow = true;
-			if (this.showWindowTimer) {
-				clearTimeout(this.showWindowTimer);
-			}
+			this.bumpWindow();
 			clearTimeout(this.focusTimer);
 			this.focusTimer = setTimeout(() => {
 				if (this.$refs.input) {
@@ -105,10 +209,55 @@ window.APP = {
 			this.syncTypingState(true);
 		},
 		ON_MESSAGE({ message }) {
-			this.messages.push(message);
+			if (!message || typeof message !== 'object') {
+				return;
+			}
+
+			const normalized = this.normalizeIncomingMessage(message);
+			this.pushMessage(normalized);
+			const isOwn = this.isOwnMessage(normalized);
+
+			let shouldMarkUnread = !isOwn && normalized.channel !== this.activeChannelId;
+			if (!shouldMarkUnread && this.isWhispersActive && normalized.channel === 'whispers') {
+				const messageConversation = normalized.metadata && normalized.metadata.conversationId
+					? String(normalized.metadata.conversationId)
+					: null;
+				shouldMarkUnread = !isOwn && !!messageConversation && messageConversation !== this.activeWhisperConversationId;
+			}
+			if (this.whisperTabEnabled && normalized.channel === 'whispers') {
+				this.syncWhisperChannelUnread();
+			} else if (shouldMarkUnread) {
+				this.incrementChannelUnread(normalized.channel, 1);
+			}
+
+			const metadata = normalized.metadata || {};
+			const incomingWhisper = metadata.type === 'whisper' && metadata.direction === 'in';
+			if (
+				incomingWhisper &&
+				(!this.whisperTabEnabled || normalized.channel !== 'whispers') &&
+				!this.showInput &&
+				this.featureState.whisperSound &&
+				this.featureState.whisperSound.active
+			) {
+				this.playWhisperNotificationSound();
+			}
+
+			this.bumpWindow();
+			this.$nextTick(() => {
+				this.scrollActiveMessagesIfNeeded(normalized);
+			});
 		},
 		ON_CLEAR() {
-			this.messages = [];
+			this.messagesByChannel = {};
+			for (let i = 0; i < this.channels.length; i += 1) {
+				this.ensureChannelHistory(this.channels[i].id);
+			}
+			this.whisperConversations = {};
+			this.hiddenWhisperConversations = {};
+			this.activeWhisperConversationId = null;
+			this.whisperPickerOpen = false;
+			this.whisperTargets = [];
+			this.unreadByChannel = {};
 			this.oldMessages = [];
 			this.oldMessagesIndex = -1;
 		},
@@ -157,7 +306,26 @@ window.APP = {
 		},
 		setFeatureState({ state }) {
 			this.featureState = normalizeFeatureState(state);
+			if (this.featureState.autoScroll) {
+				this.autoScrollEnabled = this.featureState.autoScroll.active !== false;
+			}
+			const volume = Number(this.featureState.whisperSound && this.featureState.whisperSound.volume);
+			if (Number.isFinite(volume)) {
+				this.whisperNotificationVolume = Math.max(0, Math.min(1, volume));
+			}
 			updateFeatureButtons(this.featureState);
+		},
+		setWhisperTargets({ targets }) {
+			this.whisperTargets = ensureArray(targets)
+				.filter((entry) => entry && typeof entry === 'object')
+				.map((entry) => ({
+					id: Number(entry.id) || 0,
+					name: ensureString(entry.name, ''),
+					label: ensureString(entry.label, ''),
+					fivemName: ensureString(entry.fivemName, '')
+				}))
+				.filter((entry) => entry.id > 0)
+				.sort((a, b) => a.id - b.id);
 		},
 		applyRuntimeUiConfig(rawConfig) {
 			applyRuntimeUiConfig(rawConfig);
@@ -167,6 +335,454 @@ window.APP = {
 				...this.templates,
 				...config.templates
 			};
+		},
+		applyInitialPayload(payload) {
+			const data = payload || {};
+			this.applyRuntimeUiConfig(data.ui || {});
+			this.myServerId = Number(data.playerServerId) || 0;
+			if (data.ui && typeof data.ui === 'object') {
+				this.separateChannelTabs = data.ui.separateChannelTabs !== false;
+				this.singleChannelId = ensureString(data.ui.singleChannelId, 'local');
+				if (typeof data.ui.autoScrollDefault === 'boolean') {
+					this.autoScrollEnabled = data.ui.autoScrollDefault;
+				}
+			}
+
+			if (data.whispers && typeof data.whispers === 'object') {
+				this.whisperLimits.maxConversations = normalizeLimit(data.whispers.maxConversations, 30);
+				this.whisperLimits.maxMessagesPerConversation = normalizeLimit(data.whispers.maxMessagesPerConversation, 80);
+				this.whisperLimits.defaultConversationMode = ensureString(data.whispers.defaultConversationMode, 'active-only');
+				this.whisperTabEnabled = data.whispers.separateWhisperTab !== false;
+				this.whisperFallbackChannel = ensureString(data.whispers.fallbackChannel, 'local');
+
+				if (data.whispers.sidebar && typeof data.whispers.sidebar === 'object') {
+					this.whisperSidebarCollapsible = data.whispers.sidebar.collapsible !== false;
+					this.whisperSidebarCollapsed = data.whispers.sidebar.defaultCollapsed === true;
+				}
+
+				if (data.whispers.notifications && typeof data.whispers.notifications === 'object') {
+					const volume = Number(data.whispers.notifications.volume);
+					if (Number.isFinite(volume)) {
+						this.whisperNotificationVolume = Math.max(0, Math.min(1, volume));
+					}
+				}
+			}
+
+			this.applyChannels(data.channels || [], data.activeChannel || '');
+
+			if (data.features) {
+				this.setFeatureState({ state: data.features });
+			} else {
+				updateFeatureButtons({});
+			}
+
+			if (data.distance) {
+				this.setDistanceState({ state: data.distance });
+			} else {
+				updateDistanceWidget({});
+			}
+
+			bootstrapEmojiDataset(data || {});
+		},
+		applyChannels(rawChannels, desiredActiveChannel) {
+			const channels = ensureArray(rawChannels)
+				.filter((channel) => channel && typeof channel === 'object' && typeof channel.id === 'string')
+				.map((channel) => ({
+					id: String(channel.id),
+					label: ensureString(channel.label, channel.id),
+					color: Array.isArray(channel.color) ? channel.color : [255, 255, 255],
+					order: Number.isFinite(Number(channel.order)) ? Number(channel.order) : 100,
+					visible: (this.whisperTabEnabled || String(channel.id) !== 'whispers') ? channel.visible !== false : false,
+					cycle: channel.cycle !== false,
+					maxHistory: normalizeLimit(channel.maxHistory, 250),
+					allowed: channel.allowed !== false
+				}));
+
+			this.channels = channels;
+			const nextUnreadByChannel = {};
+			for (let i = 0; i < channels.length; i += 1) {
+				const id = channels[i].id;
+				nextUnreadByChannel[id] = Number(this.unreadByChannel[id]) || 0;
+			}
+			this.unreadByChannel = nextUnreadByChannel;
+			for (let i = 0; i < channels.length; i += 1) {
+				this.ensureChannelHistory(channels[i].id);
+			}
+
+			let nextChannel = desiredActiveChannel || this.activeChannelId;
+			if (!this.separateChannelTabs) {
+				nextChannel = this.singleAllowedChannelId() || nextChannel;
+			}
+			if (!this.isChannelAllowedById(nextChannel)) {
+				nextChannel = this.firstAllowedChannelId();
+			}
+
+			if (!nextChannel && channels.length > 0) {
+				nextChannel = channels[0].id;
+			}
+
+			this.setChannel({ channelId: nextChannel || 'global' });
+		},
+		setChannel({ channelId }) {
+			let target = ensureString(channelId, '');
+			if (!this.separateChannelTabs) {
+				target = this.singleAllowedChannelId() || target;
+			}
+			if (!this.whisperTabEnabled && target === 'whispers') {
+				target = this.whisperFallbackChannel || this.firstAllowedChannelId();
+			}
+			if (!this.isChannelAllowedById(target)) {
+				target = this.firstAllowedChannelId();
+			}
+			if (!target) {
+				return;
+			}
+			this.activeChannelId = target;
+			this.clearChannelUnread(target);
+			if (this.isWhispersActive && this.activeWhisperConversationId && this.whisperConversations[this.activeWhisperConversationId]) {
+				this.whisperConversations[this.activeWhisperConversationId].unread = 0;
+			}
+			if (target === 'whispers') {
+				this.syncWhisperChannelUnread();
+			}
+		},
+		channelUnread(channelId) {
+			return Number(this.unreadByChannel[channelId]) || 0;
+		},
+		incrementChannelUnread(channelId, amount) {
+			const id = ensureString(channelId, '');
+			if (!id) {
+				return;
+			}
+			const current = Number(this.unreadByChannel[id]) || 0;
+			const delta = Math.max(1, Number(amount) || 1);
+			this.$set(this.unreadByChannel, id, current + delta);
+		},
+		clearChannelUnread(channelId) {
+			const id = ensureString(channelId, '');
+			if (!id) {
+				return;
+			}
+			this.$set(this.unreadByChannel, id, 0);
+		},
+		singleAllowedChannelId() {
+			const preferred = this.channels.find((channel) => channel.id === this.singleChannelId && channel.visible !== false && channel.allowed !== false);
+			if (preferred) {
+				return preferred.id;
+			}
+			const fallback = this.channels.find((channel) => channel.visible !== false && channel.allowed !== false);
+			return fallback ? fallback.id : '';
+		},
+		isOwnMessage(message) {
+			const metadata = message && message.metadata ? message.metadata : {};
+			const source = Number(metadata.source);
+			if (Number.isFinite(source) && this.myServerId > 0 && source === this.myServerId) {
+				return true;
+			}
+			return metadata.type === 'whisper' && metadata.direction === 'out';
+		},
+		syncWhisperChannelUnread() {
+			if (!this.whisperTabEnabled || !this.channelById('whispers')) {
+				return;
+			}
+			const hasUnread = Object.values(this.whisperConversations).some((conversation) => Number(conversation.unread) > 0);
+			this.$set(this.unreadByChannel, 'whispers', hasUnread ? 1 : 0);
+		},
+		setPermissions(payload) {
+			let permissions = {};
+			if (payload && typeof payload.permissions === 'string') {
+				try {
+					permissions = JSON.parse(payload.permissions) || {};
+				} catch (error) {
+					permissions = {};
+				}
+			} else if (payload && typeof payload.permissions === 'object') {
+				permissions = payload.permissions;
+			}
+
+			if (Array.isArray(payload && payload.channels)) {
+				this.applyChannels(payload.channels, payload.activeChannel || this.activeChannelId);
+			} else if (permissions.channels && typeof permissions.channels === 'object') {
+				this.channels = this.channels.map((channel) => ({
+					...channel,
+					allowed: permissions.channels[channel.id] !== false
+				}));
+				if (!this.isChannelAllowedById(this.activeChannelId)) {
+					const fallback = this.firstAllowedChannelId();
+					if (fallback) {
+						this.setChannel({ channelId: fallback });
+					}
+				}
+			}
+		},
+		normalizeIncomingMessage(message) {
+			const normalized = { ...message };
+			let channelId = ensureString(normalized.channel, '');
+			if (!channelId || !this.channelById(channelId)) {
+				channelId = this.activeChannelId || this.firstAllowedChannelId() || 'global';
+			}
+
+			normalized.channel = channelId;
+			normalized.label = ensureString(normalized.label, (this.channelById(channelId) || {}).label || 'Chat');
+			normalized.color = Array.isArray(normalized.color) ? normalized.color : ((this.channelById(channelId) || {}).color || [255, 255, 255]);
+			normalized.args = Array.isArray(normalized.args)
+				? normalized.args
+				: [ensureString(normalized.text, normalized.label)];
+			normalized.metadata = normalized.metadata && typeof normalized.metadata === 'object' ? normalized.metadata : {};
+			normalized._id = this.nextMessageId;
+			this.nextMessageId += 1;
+
+			return normalized;
+		},
+		pushMessage(message) {
+			if (this.whisperTabEnabled && message.metadata && message.metadata.type === 'whisper' && message.metadata.conversationId) {
+				this.pushWhisperMessage(message);
+				return;
+			}
+
+			this.ensureChannelHistory(message.channel);
+			this.messagesByChannel[message.channel].push(message);
+			this.trimChannelHistory(message.channel);
+		},
+		pushWhisperMessage(message) {
+			const metadata = message.metadata || {};
+			let conversationId = String(metadata.conversationId || metadata.peerId || 'conversation');
+			const peerId = Number(metadata.peerId) || null;
+			const existingConversationId = peerId ? this.findWhisperConversationIdByPeer(peerId) : null;
+			if (existingConversationId && !this.whisperConversations[conversationId]) {
+				conversationId = existingConversationId;
+			}
+
+			const defaultPeerName = metadata.peerName || (metadata.peerId ? `Player ${metadata.peerId}` : 'Unknown');
+			const conversation = this.whisperConversations[conversationId] || {
+				id: conversationId,
+				peerName: defaultPeerName,
+				peerId,
+				messages: [],
+				lastAt: 0,
+				unread: 0
+			};
+
+			conversation.peerName = metadata.peerName || conversation.peerName || defaultPeerName;
+			conversation.peerId = peerId || conversation.peerId;
+			conversation.messages.push(message);
+			if (this.whisperLimits.maxMessagesPerConversation !== -1 && conversation.messages.length > this.whisperLimits.maxMessagesPerConversation) {
+				conversation.messages.splice(0, conversation.messages.length - this.whisperLimits.maxMessagesPerConversation);
+			}
+			conversation.lastAt = Date.now();
+
+			const direction = ensureString(metadata.direction, '');
+			const incoming = direction === 'in';
+			if (this.isWhispersActive && this.activeWhisperConversationId === conversationId) {
+				conversation.unread = 0;
+			} else if (incoming) {
+				conversation.unread += 1;
+			}
+
+			this.$delete(this.hiddenWhisperConversations, conversationId);
+			this.$set(this.whisperConversations, conversationId, conversation);
+			this.trimWhisperConversations();
+
+			if (direction === 'out') {
+				this.setChannel({ channelId: 'whispers' });
+				this.activeWhisperConversationId = conversationId;
+				conversation.unread = 0;
+			} else if (!this.activeWhisperConversationId) {
+				this.activeWhisperConversationId = conversationId;
+			}
+			this.syncWhisperChannelUnread();
+
+			if (incoming && !this.showInput && this.featureState.whisperSound && this.featureState.whisperSound.active) {
+				this.playWhisperNotificationSound();
+			}
+		},
+		trimWhisperConversations() {
+			const maxConversations = normalizeLimit(this.whisperLimits.maxConversations, 30);
+			if (maxConversations === -1) {
+				return;
+			}
+			const entries = Object.values(this.whisperConversations)
+				.sort((a, b) => b.lastAt - a.lastAt);
+
+			if (entries.length <= maxConversations) {
+				return;
+			}
+
+			for (let i = maxConversations; i < entries.length; i += 1) {
+				this.$delete(this.whisperConversations, entries[i].id);
+				this.$delete(this.hiddenWhisperConversations, entries[i].id);
+			}
+
+			if (this.activeWhisperConversationId && !this.whisperConversations[this.activeWhisperConversationId]) {
+				this.activeWhisperConversationId = entries[0] ? entries[0].id : null;
+			}
+		},
+		findWhisperConversationIdByPeer(peerId) {
+			if (!peerId) {
+				return null;
+			}
+			const numericPeer = Number(peerId);
+			const entries = Object.values(this.whisperConversations);
+			for (let i = 0; i < entries.length; i += 1) {
+				if (Number(entries[i].peerId) === numericPeer) {
+					return entries[i].id;
+				}
+			}
+			return null;
+		},
+		selectWhisperConversation(conversationId) {
+			if (!conversationId || !this.whisperConversations[conversationId]) {
+				return;
+			}
+			this.$delete(this.hiddenWhisperConversations, conversationId);
+			this.activeWhisperConversationId = conversationId;
+			this.whisperConversations[conversationId].unread = 0;
+			if (this.isWhispersActive) {
+				this.clearChannelUnread('whispers');
+			}
+			this.syncWhisperChannelUnread();
+			this.whisperPickerOpen = false;
+			this.$nextTick(() => this.scrollActiveMessages(false));
+		},
+		closeWhisperConversation(conversationId) {
+			if (!conversationId || !this.whisperConversations[conversationId]) {
+				return;
+			}
+			this.$set(this.hiddenWhisperConversations, conversationId, true);
+			if (this.activeWhisperConversationId === conversationId) {
+				const first = this.whisperConversationList[0];
+				this.activeWhisperConversationId = first ? first.id : null;
+			}
+			this.syncWhisperChannelUnread();
+		},
+		toggleWhisperSidebarMode() {
+			if (!this.whisperSidebarCollapsible) {
+				return;
+			}
+			this.whisperSidebarCollapsed = !this.whisperSidebarCollapsed;
+		},
+		toggleWhisperPicker() {
+			if (!this.whisperTabEnabled) {
+				return;
+			}
+
+			const next = !this.whisperPickerOpen;
+			this.whisperPickerOpen = next;
+			if (!next) {
+				return;
+			}
+
+			fetchJson('getWhisperTargets', {}).catch(() => null);
+		},
+		startWhisperConversation(player) {
+			const peerId = Number(player && player.id);
+			if (!Number.isFinite(peerId) || peerId <= 0) {
+				return;
+			}
+
+			let conversationId = this.findWhisperConversationIdByPeer(peerId);
+			if (!conversationId) {
+				conversationId = `id:${peerId}`;
+				this.$set(this.whisperConversations, conversationId, {
+					id: conversationId,
+					peerName: ensureString(player.name, '') || ensureString(player.label, `Player ${peerId}`),
+					peerId,
+					messages: [],
+					lastAt: Date.now(),
+					unread: 0
+				});
+			}
+
+			this.$delete(this.hiddenWhisperConversations, conversationId);
+			this.activeWhisperConversationId = conversationId;
+			this.whisperPickerOpen = false;
+			this.setChannel({ channelId: 'whispers' });
+			this.$nextTick(() => this.scrollActiveMessages(false));
+		},
+		playWhisperNotificationSound() {
+			const volume = Math.max(0, Math.min(1, Number(this.whisperNotificationVolume) || 0.65));
+			if (volume <= 0) {
+				return;
+			}
+			postJson('playWhisperSound', { volume });
+		},
+		selectChannel(channelId) {
+			if (!this.isChannelAllowedById(channelId)) {
+				return;
+			}
+			this.setChannel({ channelId });
+			fetchJson('setChannel', { channelId }).catch(() => null);
+			const input = document.querySelector('textarea');
+			if (input) {
+				input.focus();
+			}
+		},
+		channelById(channelId) {
+			for (let i = 0; i < this.channels.length; i += 1) {
+				if (this.channels[i].id === channelId) {
+					return this.channels[i];
+				}
+			}
+			return null;
+		},
+		channelColor(channel) {
+			return colorToRgb((channel && channel.color) || [255, 255, 255]);
+		},
+		isChannelAllowedById(channelId) {
+			const channel = this.channelById(channelId);
+			return !!channel && channel.visible !== false && channel.allowed !== false;
+		},
+		firstAllowedChannelId() {
+			const available = this.visibleChannels;
+			if (available.length === 0) {
+				return '';
+			}
+			return available[0].id;
+		},
+		ensureChannelHistory(channelId) {
+			if (!this.messagesByChannel[channelId]) {
+				this.$set(this.messagesByChannel, channelId, []);
+			}
+		},
+		trimChannelHistory(channelId) {
+			const list = this.messagesByChannel[channelId];
+			if (!Array.isArray(list)) {
+				return;
+			}
+			const channel = this.channelById(channelId);
+			const maxHistory = normalizeLimit(channel && channel.maxHistory, 250);
+			if (maxHistory === -1) {
+				return;
+			}
+			if (list.length > maxHistory) {
+				list.splice(0, list.length - maxHistory);
+			}
+		},
+		scrollActiveMessagesIfNeeded(message) {
+			if (!this.autoScrollEnabled) {
+				return;
+			}
+			if (!message || message.channel !== this.activeChannelId) {
+				return;
+			}
+			if (this.isWhispersActive) {
+				const messageConversation = message.metadata && message.metadata.conversationId
+					? String(message.metadata.conversationId)
+					: null;
+				if (messageConversation && messageConversation !== this.activeWhisperConversationId) {
+					return;
+				}
+			}
+			this.scrollActiveMessages(false);
+		},
+		scrollActiveMessages(force) {
+			if (!force && !this.autoScrollEnabled) {
+				return;
+			}
+			const target = this.isWhispersActive ? this.$refs.whisperMessages : this.$refs.messages;
+			if (target) {
+				target.scrollTop = target.scrollHeight;
+			}
 		},
 		removeThemes() {
 			document.querySelectorAll('script[data-theme]').forEach((node) => {
@@ -239,9 +855,12 @@ window.APP = {
 			}
 		},
 		warn(msg) {
-			this.messages.push({
-				args: [msg],
-				template: '^3<b>CHAT-WARN</b>: ^0{0}'
+			this.ON_MESSAGE({
+				message: {
+					channel: this.activeChannelId || 'global',
+					args: [msg],
+					template: '^3<b>CHAT-WARN</b>: ^0{0}'
+				}
 			});
 		},
 		clearShowWindowTimer() {
@@ -256,6 +875,10 @@ window.APP = {
 				}
 			}, fadeTimeout);
 		},
+		bumpWindow() {
+			this.showWindow = true;
+			this.resetShowWindowTimer();
+		},
 		keyUp() {
 			this.resize();
 			this.syncTypingState(false);
@@ -264,12 +887,11 @@ window.APP = {
 			if (event.which === 38 || event.which === 40) {
 				event.preventDefault();
 				this.moveOldMessageIndex(event.which === 38);
-			} else if (event.which === 33) {
-				const buf = document.getElementsByClassName('chat-messages')[0];
-				buf.scrollTop -= uiRuntimeValue('pageScrollStep', 100);
-			} else if (event.which === 34) {
-				const buf = document.getElementsByClassName('chat-messages')[0];
-				buf.scrollTop += uiRuntimeValue('pageScrollStep', 100);
+			} else if (event.which === 33 || event.which === 34) {
+				const target = this.isWhispersActive ? this.$refs.whisperMessages : this.$refs.messages;
+				if (target) {
+					target.scrollTop += event.which === 33 ? -uiRuntimeValue('pageScrollStep', 100) : uiRuntimeValue('pageScrollStep', 100);
+				}
 			} else if (event.which === 9) {
 				event.preventDefault();
 				postJson('cycleChannel', {});
@@ -293,13 +915,22 @@ window.APP = {
 			if (!input) {
 				return;
 			}
-			input.style.height = '5px';
-			input.style.height = `${input.scrollHeight + 2}px`;
+			input.style.height = 'auto';
+			input.style.height = `${Math.max(input.scrollHeight + 2, 36)}px`;
 		},
 		send() {
 			if (this.message !== '') {
-				postJson('chatResult', { message: this.message });
-				this.oldMessages.unshift(this.message);
+				const original = this.message;
+				let outgoing = original;
+				if (this.whisperTabEnabled && this.isWhispersActive && original.charAt(0) !== '/' && this.activeWhisperConversationId) {
+					const conversation = this.whisperConversations[this.activeWhisperConversationId];
+					if (conversation && Number(conversation.peerId) > 0) {
+						outgoing = `/w ${Number(conversation.peerId)} ${original}`;
+					}
+				}
+
+				postJson('chatResult', { message: outgoing });
+				this.oldMessages.unshift(original);
 				this.oldMessagesIndex = -1;
 				this.hideInput(false);
 			} else {
@@ -323,26 +954,6 @@ window.APP = {
 			}
 			this.lastTypingState = active;
 			postJson('typingState', { active });
-		},
-		setChannel({ channelId }) {
-			document.querySelectorAll('.channel').forEach((node) => {
-				node.className = node.id === channelId ? 'channel tab active-tab' : 'channel tab';
-			});
-		},
-		setPermissions({ permissions }) {
-			let perms = {};
-			try {
-				perms = JSON.parse(permissions) || {};
-			} catch (error) {
-				perms = {};
-			}
-
-			const staffTab = document.getElementById('channel-staff');
-			if (!staffTab) {
-				return;
-			}
-
-			staffTab.style.display = perms.canAccessStaffChannel ? 'inline-flex' : 'none';
 		},
 		cycleDistanceButton() {
 			return fetchJson('cycleDistance', {})
@@ -372,6 +983,37 @@ window.APP = {
 						this.featureState.bubbles.active = resp.active;
 						updateFeatureButtons(this.featureState);
 					}
+					return resp;
+				})
+				.catch(() => null);
+		},
+		toggleWhisperSoundButton() {
+			return fetchJson('toggleWhisperSound', {})
+				.then((resp) => {
+					if (resp && typeof resp.active === 'boolean') {
+						this.featureState.whisperSound.active = resp.active;
+					}
+					const volume = Number(resp && resp.volume);
+					if (Number.isFinite(volume)) {
+						this.featureState.whisperSound.volume = volume;
+						this.whisperNotificationVolume = Math.max(0, Math.min(1, volume));
+					}
+					updateFeatureButtons(this.featureState);
+					return resp;
+				})
+				.catch(() => null);
+		},
+		toggleAutoScrollButton() {
+			return fetchJson('toggleAutoScroll', {})
+				.then((resp) => {
+					if (resp && typeof resp.active === 'boolean') {
+						this.featureState.autoScroll.active = resp.active;
+						this.autoScrollEnabled = resp.active;
+						if (this.autoScrollEnabled) {
+							this.$nextTick(() => this.scrollActiveMessages(true));
+						}
+					}
+					updateFeatureButtons(this.featureState);
 					return resp;
 				})
 				.catch(() => null);
@@ -457,38 +1099,15 @@ window.addEventListener('load', () => {
 	fetch('https://' + resourceName() + '/onLoad')
 		.then((resp) => resp.json())
 		.then((payload) => {
-			applyRuntimeUiConfig(payload.ui || {});
-			if (window.APP_INSTANCE && typeof window.APP_INSTANCE.applyRuntimeUiConfig === 'function') {
-				window.APP_INSTANCE.applyRuntimeUiConfig(payload.ui || {});
-			}
-
-			document.getElementById('channel-local').style.color = colorToRgb(payload.localColor);
-			document.getElementById('channel-global').style.color = colorToRgb(payload.globalColor);
-			document.getElementById('channel-staff').style.color = colorToRgb(payload.staffColor);
-
-			if (payload.features && window.APP_INSTANCE) {
-				window.APP_INSTANCE.setFeatureState({ state: payload.features });
+			if (window.APP_INSTANCE && typeof window.APP_INSTANCE.applyInitialPayload === 'function') {
+				window.APP_INSTANCE.applyInitialPayload(payload || {});
 			} else {
-				updateFeatureButtons(payload.features || {});
+				bootstrapEmojiDataset(payload || {});
 			}
-
-			if (payload.distance && window.APP_INSTANCE) {
-				window.APP_INSTANCE.setDistanceState({ state: payload.distance });
-			} else {
-				updateDistanceWidget(payload.distance || {});
-			}
-
-			bootstrapEmojiDataset(payload || {});
 		})
 		.catch(() => {
 			bootstrapEmojiDataset({});
 		});
-
-	document.querySelectorAll('.channel').forEach((node) => {
-		node.addEventListener('click', function onChannelClick() {
-			fetchJson('setChannel', { channelId: this.id });
-		});
-	});
 
 	document.querySelectorAll('.tab, .tool-btn').forEach((node) => {
 		node.addEventListener('click', () => {
@@ -546,6 +1165,30 @@ window.addEventListener('load', () => {
 		});
 	}
 
+	const autoScrollButton = document.getElementById('autoscroll-toggle');
+	if (autoScrollButton) {
+		autoScrollButton.addEventListener('click', () => {
+			if (autoScrollButton.classList.contains('disabled-toggle')) {
+				return;
+			}
+			if (window.APP_INSTANCE) {
+				window.APP_INSTANCE.toggleAutoScrollButton();
+			}
+		});
+	}
+
+	const whisperSoundButton = document.getElementById('whisper-sound-toggle');
+	if (whisperSoundButton) {
+		whisperSoundButton.addEventListener('click', () => {
+			if (whisperSoundButton.classList.contains('disabled-toggle')) {
+				return;
+			}
+			if (window.APP_INSTANCE) {
+				window.APP_INSTANCE.toggleWhisperSoundButton();
+			}
+		});
+	}
+
 	document.querySelectorAll('.no-focus').forEach((node) => {
 		node.addEventListener('focus', (event) => {
 			event.preventDefault();
@@ -557,5 +1200,3 @@ window.addEventListener('load', () => {
 		});
 	});
 });
-
-

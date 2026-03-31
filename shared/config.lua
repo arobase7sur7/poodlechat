@@ -1,4 +1,4 @@
-Config = {}
+﻿Config = {}
 
 Config.Chat = {
 	-- RGB color used for /me action messages (don't mind if using my QB-RPCommands script)
@@ -32,6 +32,257 @@ Config.Chat = {
 	printToConsole = true
 }
 
+Config.Channels = {
+	["local"] = { -- channel id, used for routing and permissions
+		label = 'Local', -- display label for UI
+		color = {0, 153, 204}, -- RGB color for UI elements (can be hex string too, like '#0099cc')
+		order = 10, -- numeric order for channel sorting in UI
+		visible = true, -- whether the channel is visible/selectable in UI
+		cycle = true, -- whether the channel is included when cycling with a keybind (like TAB)
+		requiresAce = nil, -- optional ACE permission required to view/send in this channel, nil for no requirement
+		maxHistory = 250 -- maximum number of messages to keep in history for this channel (per player)
+	},
+	global = {
+		label = 'Global',
+		color = {212, 175, 55},
+		order = 20,
+		visible = true,
+		cycle = true,
+		requiresAce = nil,
+		maxHistory = 300
+	},
+	staff = {
+		label = 'Staff',
+		color = {255, 64, 0},
+		order = 30,
+		visible = true,
+		cycle = true,
+		requiresAce = 'chat.staffChannel',
+		maxHistory = 250
+	},
+	whispers = {
+		label = 'Whispers',
+		color = {254, 127, 156},
+		order = 40,
+		visible = true,
+		cycle = true,
+		requiresAce = nil,
+		maxHistory = 250
+	}
+}
+
+Config.Commands = {
+	global = { -- Command id used for routing and permissions
+		enabled = true, -- master toggle for this command, can be used to disable specific commands without removing them from the config
+		command = 'global', -- main command name, used for invocation (e.g. /global) and routing
+		aliases = {'g'}, -- alternative command names that trigger the same handler (e.g. /g)
+		channel = 'global', -- default channel id to route messages from this command, must match a key in Config.Channels
+		label = 'GLOBAL', -- display label for messages from this command, can be used in UI templates
+		color = '#d4af37', -- color for messages from this command, can be RGB table or hex string
+		handler = 'global' -- identifier for the server-side handler function
+	},
+	say = {
+		enabled = true,
+		command = 'say',
+		aliases = {},
+		channel = 'local',
+		label = 'LOCAL',
+		color = '#0099cc',
+		handler = 'local'
+	},
+	ooc = {
+		enabled = true,
+		command = 'ooc',
+		aliases = {'b'},
+		channel = 'global',
+		label = 'OOC',
+		color = '#cccccc',
+		handler = 'global'
+	},
+	me = {
+		enabled = true,
+		command = 'me',
+		aliases = {},
+		channel = 'local',
+		label = 'ME',
+		color = '#ffcc00',
+		handler = 'action'
+	},
+	staff = {
+		enabled = true,
+		command = 'staff',
+		aliases = {},
+		channel = 'staff',
+		label = 'STAFF',
+		color = '#ff4000',
+		handler = 'staff',
+		permission = 'chat.staffChannel'
+	},
+	whisper = {
+		enabled = true,
+		command = 'dm',
+		aliases = {'whisper', 'w', 'msg'},
+		channel = 'whispers',
+		label = 'DM',
+		color = '#a970ff',
+		handler = 'whisper'
+	},
+	reply = {
+		enabled = true,
+		command = 'reply',
+		aliases = {'r'},
+		channel = 'whispers',
+		label = 'REPLY',
+		color = '#a970ff',
+		handler = 'reply'
+	},
+	clear = {
+		enabled = true,
+		command = 'clear',
+		aliases = {},
+		channel = 'global',
+		label = 'SYSTEM',
+		color = '#ffffff',
+		handler = 'clear'
+	},
+	togglechat = {
+		enabled = true,
+		command = 'togglechat',
+		aliases = {},
+		channel = 'global',
+		label = 'SYSTEM',
+		color = '#ffffff',
+		handler = 'togglechat'
+	},
+	toggleoverhead = {
+		enabled = true,
+		command = 'toggleoverhead',
+		aliases = {},
+		channel = 'global',
+		label = 'SYSTEM',
+		color = '#ffffff',
+		handler = 'toggleoverhead'
+	},
+	toggletyping = {
+		enabled = true,
+		command = 'toggletyping',
+		aliases = {},
+		channel = 'global',
+		label = 'SYSTEM',
+		color = '#ffffff',
+		handler = 'toggletyping'
+	},
+	togglebubbles = {
+		enabled = true,
+		command = 'togglebubbles',
+		aliases = {},
+		channel = 'global',
+		label = 'SYSTEM',
+		color = '#ffffff',
+		handler = 'togglebubbles'
+	},
+	report = {
+		enabled = true,
+		command = 'report',
+		aliases = {},
+		channel = 'global',
+		label = 'REPORT',
+		color = '#ffa500',
+		handler = 'report'
+	},
+	mute = {
+		enabled = true,
+		command = 'mute',
+		aliases = {},
+		channel = 'global',
+		label = 'SYSTEM',
+		color = '#ffff80',
+		handler = 'mute'
+	},
+	unmute = {
+		enabled = true,
+		command = 'unmute',
+		aliases = {},
+		channel = 'global',
+		label = 'SYSTEM',
+		color = '#ffff80',
+		handler = 'unmute'
+	},
+	muted = {
+		enabled = true,
+		command = 'muted',
+		aliases = {},
+		channel = 'global',
+		label = 'SYSTEM',
+		color = '#ffff80',
+		handler = 'muted'
+	},
+	nick = {
+		enabled = true,
+		command = 'nick',
+		aliases = {},
+		channel = 'global',
+		label = 'SYSTEM',
+		color = '#ffff80',
+		handler = 'nick'
+	}
+}
+
+Config.CommandRouting = {
+	defaultChannel = 'global', -- default channel id for commands that don't specify one, must match a key in Config.Channels
+	responseWindowMs = 1500, -- time window to route follow-up messages from the same player to the same channel after an initial command message, helps with commands that have multiple responses or require additional input, set to 0 to disable
+	keepLegacyAliases = true, -- when true, command aliases that match other command names (e.g. /g for /global) will still trigger the original command handler instead of being overridden by the new one, set to false to have aliases take precedence over existing command names
+	overrides = { -- route specific command names to different channels/handlers, useful for compatibility with existing scripts or custom command setups, keys are command names (without prefix), values are channel ids or handler identifiers
+		me = 'local',
+		["do"] = 'local', -- Work with other scripts than only poodlechat, here "do" do not exist on this script
+		ooc = 'global',
+		staff = 'staff',
+		whisper = 'whispers',
+		dm = 'whispers',
+		reply = 'whispers',
+		r = 'whispers'
+	}
+}
+
+Config.Whispers = {
+	-- Enables whisper conversation UI/tab features
+	-- When false, whispers fall back to normal channel delivery and command-only behavior
+	separateWhisperTab = true,
+
+	-- Channel used to display whisper messages when separateWhisperTab is disabled
+	-- Must match an existing channel id in Config.Channels
+	fallbackChannel = 'local',
+
+	-- Maximum number of whisper conversations kept in memory (-1 = unlimited)
+	maxConversations = -1,
+
+	-- Maximum number of messages kept per whisper conversation (-1 = unlimited)
+	maxMessagesPerConversation = 250,
+	defaultConversationMode = 'active-only',
+
+	notifications = {
+		-- Enables incoming whisper sound notifications by default
+		enabled = true,
+
+		-- 0.0 - 1.0 volume for whisper sound notifications
+		volume = 0.65,
+
+		-- GTA frontend sound name used for whisper notifications
+		soundName = 'SELECT',
+
+		-- GTA frontend soundset used for whisper notifications
+		soundSet = 'HUD_FRONTEND_DEFAULT_SOUNDSET'
+	},
+
+	sidebar = {
+		-- Allow collapsed sidebar mode in whisper tab
+		collapsible = true,
+
+		-- Initial sidebar collapsed state
+		defaultCollapsed = false
+	}
+}
+
 Config.Access = {
 	-- Identifier type used for per-player persistent data
 	-- Common values: "license", "steam", "discord"
@@ -45,11 +296,33 @@ Config.Access = {
 	-- ACE permission that bypasses local mute filtering
 	noMuteAce = 'chat.noMute',
 
+	-- Optional display-name resolver:
+	-- function(source, fallbackName) -> string|nil
+	-- Example with QBCore:
+	-- getDisplayName = function(source, fallbackName)
+	-- 	local QB = exports['qb-core']:GetCoreObject()
+	-- 	local player = QB and QB.Functions and QB.Functions.GetPlayer(source)
+	-- 	if player and player.PlayerData and player.PlayerData.charinfo then
+	-- 		local charinfo = player.PlayerData.charinfo
+	-- 		return (charinfo.firstname or '') .. ' ' .. (charinfo.lastname or '')
+	-- 	end
+	-- 	return fallbackName
+	-- end,
+	getDisplayName = function(source, fallbackName)
+		local QB = exports['qb-core']:GetCoreObject()
+		local player = QB and QB.Functions and QB.Functions.GetPlayer(source)
+		if player and player.PlayerData and player.PlayerData.charinfo then
+			local charinfo = player.PlayerData.charinfo
+			return (charinfo.firstname or '') .. ' ' .. (charinfo.lastname and charinfo.lastname:sub(1, 1) .. '.' or '')
+		end
+		return fallbackName
+	end,
+
 	-- Optional role prefixes resolved by ACE
 	-- First matching ACE wins
 	-- Role color, if set, overrides default name color in chat
 	roles = {
-		-- {name = 'Admin', ace = 'chat.admin'},
+		 {name = 'Admin', ace = 'chat.admin'},
 		-- {name = 'Moderator', color = {0, 255, 0}, ace = 'chat.moderator'}
 	}
 }
@@ -77,11 +350,24 @@ Config.UI = {
 
 	-- Inline CSS sizing applied to chat window
 	chatStyle = {
-		width = '38%',
-		height = '22%'
+		width = '40%',
+		height = '25%'
 	},
 
-	-- Show overhead text messages by default for each player (use the default poodlechat system, set to false if chatbubbles is activated as it will display both otherwise)
+	-- Show tabs for every channel
+	-- Set to false to use a single fixed tab/channel UI
+	-- Note: Whisper tab is still shown separately when Config.Whispers.separateWhisperTab is true, regardless of this setting
+	separateChannelTabs = true,
+
+	-- Channel used when separateChannelTabs is false
+	-- Must match an existing channel id in Config.Channels
+	singleChannelId = 'local',
+
+	-- When true, chat always scrolls to latest message
+	-- Players can still toggle this in-game
+	autoScrollDefault = true,
+
+	-- Show overhead text messages by default for each player (use the original poodlechat system, set to false if chatbubbles is activated as it will display both otherwise)
 	displayOverheadByDefault = false,
 
 	-- Maximum distance (meters) to render overhead text

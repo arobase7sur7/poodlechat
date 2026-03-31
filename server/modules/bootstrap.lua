@@ -15,6 +15,26 @@ local logColors = {
 	warning = '\x1B[33m'
 }
 
+local legacyCommandAliases = {
+	global = {'global', 'g'},
+	say = {'say'},
+	ooc = {'ooc', 'b'},
+	me = {'me'},
+	staff = {'staff'},
+	whisper = {'whisper', 'w', 'msg', 'dm'},
+	reply = {'reply', 'r'},
+	clear = {'clear'},
+	togglechat = {'togglechat'},
+	toggleoverhead = {'toggleoverhead'},
+	toggletyping = {'toggletyping'},
+	togglebubbles = {'togglebubbles'},
+	report = {'report'},
+	mute = {'mute'},
+	unmute = {'unmute'},
+	muted = {'muted'},
+	nick = {'nick'}
+}
+
 local function log(label, message)
 	local color = logColors[label] or logColors.default
 	print(string.format('%s[%s]%s %s', color, label, logColors.default, message))
@@ -48,6 +68,58 @@ local function clampColorChannel(value)
 	return math.floor(number)
 end
 
+local function normalizeHexColor(value)
+	if type(value) ~= 'string' then
+		return nil
+	end
+
+	local raw = value:gsub('%s+', ''):lower()
+	local r, g, b = raw:match('^#?(%x%x)(%x%x)(%x%x)$')
+	if r and g and b then
+		return {
+			tonumber(r, 16),
+			tonumber(g, 16),
+			tonumber(b, 16)
+		}
+	end
+
+	local a, rr, gg, bb = raw:match('^#?(%x%x)(%x%x)(%x%x)(%x%x)$')
+	if a and rr and gg and bb then
+		return {
+			tonumber(rr, 16),
+			tonumber(gg, 16),
+			tonumber(bb, 16)
+		}
+	end
+
+	return nil
+end
+
+local function normalizeRgbColor(value, fallback)
+	if type(value) == 'table' then
+		return {
+			clampColorChannel(value[1] or value.r),
+			clampColorChannel(value[2] or value.g),
+			clampColorChannel(value[3] or value.b)
+		}
+	end
+
+	local parsed = normalizeHexColor(value)
+	if parsed then
+		return parsed
+	end
+
+	if type(fallback) == 'table' then
+		return {
+			clampColorChannel(fallback[1] or fallback.r),
+			clampColorChannel(fallback[2] or fallback.g),
+			clampColorChannel(fallback[3] or fallback.b)
+		}
+	end
+
+	return {255, 255, 255}
+end
+
 local function toDiscordColor(value, fallback)
 	if type(value) == 'number' then
 		return math.floor(value)
@@ -61,6 +133,277 @@ local function toDiscordColor(value, fallback)
 	end
 
 	return fallback
+end
+
+local function normalizeKey(value)
+	if type(value) ~= 'string' then
+		return nil
+	end
+
+	local normalized = value:lower():gsub('^%s+', ''):gsub('%s+$', '')
+	if normalized == '' then
+		return nil
+	end
+
+	return normalized
+end
+
+local function appendUnique(list, seen, value)
+	local normalized = normalizeKey(value)
+	if not normalized then
+		return
+	end
+
+	if seen[normalized] then
+		return
+	end
+
+	seen[normalized] = true
+	list[#list + 1] = normalized
+end
+
+local function sortByOrderThenId(a, b)
+	if a.order == b.order then
+		return a.id < b.id
+	end
+	return a.order < b.order
+end
+
+local function normalizeHistoryLimit(value, fallback)
+	local number = tonumber(value)
+	if number == nil then
+		number = tonumber(fallback)
+	end
+
+	if number == nil then
+		return 250
+	end
+
+	number = math.floor(number)
+	if number < 0 then
+		return -1
+	end
+	if number == 0 then
+		return math.max(1, math.floor(tonumber(fallback) or 250))
+	end
+
+	return number
+end
+
+local function buildChannelDefinitions(channelsConfig, chatConfig, accessConfig)
+	local defaults = {
+		["local"] = {
+			label = 'Local',
+			color = chatConfig.localColor or {0, 153, 204},
+			order = 10,
+			visible = true,
+			cycle = true,
+			requiresAce = nil,
+			maxHistory = 250
+		},
+		global = {
+			label = 'Global',
+			color = chatConfig.globalColor or {212, 175, 55},
+			order = 20,
+			visible = true,
+			cycle = true,
+			requiresAce = nil,
+			maxHistory = 300
+		},
+		staff = {
+			label = 'Staff',
+			color = chatConfig.staffColor or {255, 64, 0},
+			order = 30,
+			visible = true,
+			cycle = true,
+			requiresAce = tostring(accessConfig.staffChannelAce or 'chat.staffChannel'),
+			maxHistory = 250
+		},
+		whispers = {
+			label = 'Whispers',
+			color = chatConfig.whisperColor or {254, 127, 156},
+			order = 40,
+			visible = true,
+			cycle = true,
+			requiresAce = nil,
+			maxHistory = 250
+		}
+	}
+
+	local merged = {}
+
+	for channelId, defaultEntry in pairs(defaults) do
+		local override = type(channelsConfig[channelId]) == 'table' and channelsConfig[channelId] or {}
+		merged[channelId] = {
+			id = channelId,
+			label = tostring(override.label or defaultEntry.label),
+			color = normalizeRgbColor(override.color, defaultEntry.color),
+			order = tonumber(override.order) or defaultEntry.order,
+			visible = override.visible ~= false,
+			cycle = override.cycle ~= false,
+			requiresAce = isSet(override.requiresAce) and tostring(override.requiresAce) or defaultEntry.requiresAce,
+			maxHistory = normalizeHistoryLimit(override.maxHistory, defaultEntry.maxHistory)
+		}
+	end
+
+	for rawId, rawEntry in pairs(channelsConfig) do
+		local channelId = normalizeKey(rawId)
+		if channelId and type(rawEntry) == 'table' and not merged[channelId] then
+			merged[channelId] = {
+				id = channelId,
+				label = tostring(rawEntry.label or channelId),
+				color = normalizeRgbColor(rawEntry.color, {255, 255, 255}),
+				order = tonumber(rawEntry.order) or 100,
+				visible = rawEntry.visible ~= false,
+				cycle = rawEntry.cycle ~= false,
+				requiresAce = isSet(rawEntry.requiresAce) and tostring(rawEntry.requiresAce) or nil,
+				maxHistory = normalizeHistoryLimit(rawEntry.maxHistory, 250)
+			}
+		end
+	end
+
+	local list = {}
+	local byId = {}
+
+	for _, channel in pairs(merged) do
+		list[#list + 1] = channel
+		byId[channel.id] = channel
+	end
+
+	table.sort(list, sortByOrderThenId)
+
+	return list, byId
+end
+
+local function buildCommandDefinitions(commandsConfig, keepLegacyAliases)
+	local commandByKey = {}
+
+	for rawKey, rawEntry in pairs(commandsConfig) do
+		if type(rawEntry) == 'table' and rawEntry.enabled ~= false then
+			local key = normalizeKey(rawKey)
+			if key then
+				local commandName = normalizeKey(rawEntry.command) or key
+				local aliases = {}
+				local seenNames = {}
+				seenNames[commandName] = true
+
+				if type(rawEntry.aliases) == 'table' then
+					for i = 1, #rawEntry.aliases do
+						appendUnique(aliases, seenNames, rawEntry.aliases[i])
+					end
+				end
+
+				if keepLegacyAliases then
+					local legacy = legacyCommandAliases[key]
+					if type(legacy) == 'table' then
+						for i = 1, #legacy do
+							local legacyName = legacy[i]
+							if normalizeKey(legacyName) ~= commandName then
+								appendUnique(aliases, seenNames, legacyName)
+							end
+						end
+					end
+				end
+
+				commandByKey[key] = {
+					key = key,
+					enabled = true,
+					command = commandName,
+					aliases = aliases,
+					channel = normalizeKey(rawEntry.channel) or 'global',
+					label = tostring(rawEntry.label or key:upper()),
+					color = normalizeRgbColor(rawEntry.color, {255, 255, 255}),
+					handler = normalizeKey(rawEntry.handler) or key,
+					permission = isSet(rawEntry.permission) and tostring(rawEntry.permission) or nil,
+					help = tostring(rawEntry.help or '')
+				}
+			end
+		end
+	end
+
+	return commandByKey
+end
+
+local function buildCommandNameLookup(commandByKey)
+	local lookup = {}
+
+	for key, command in pairs(commandByKey) do
+		lookup[command.command] = key
+		for i = 1, #command.aliases do
+			local alias = command.aliases[i]
+			if lookup[alias] == nil then
+				lookup[alias] = key
+			end
+		end
+	end
+
+	return lookup
+end
+
+local function buildRoutingOverrides(overrides, channelById)
+	local normalized = {}
+	if type(overrides) ~= 'table' then
+		return normalized
+	end
+
+	for rawKey, rawChannel in pairs(overrides) do
+		local key = normalizeKey(rawKey)
+		local channelId = normalizeKey(rawChannel)
+		if key and channelId and channelById[channelId] then
+			normalized[key] = channelId
+		end
+	end
+
+	return normalized
+end
+
+local function canAccessChannel(source, channelId)
+	local id = normalizeKey(channelId)
+	if not id then
+		return false
+	end
+
+	local channel = constants and constants.ChannelById and constants.ChannelById[id] or nil
+	if not channel then
+		return false
+	end
+
+	local requiredAce = isSet(channel.requiresAce) and tostring(channel.requiresAce) or nil
+	if not requiredAce then
+		return true
+	end
+
+	return IsPlayerAceAllowed(source, requiredAce)
+end
+
+local function getChannelById(channelId)
+	local id = normalizeKey(channelId)
+	if not id then
+		return nil
+	end
+
+	return constants and constants.ChannelById and constants.ChannelById[id] or nil
+end
+
+local function getDefaultChannelId()
+	if constants and constants.DefaultChannelId then
+		return constants.DefaultChannelId
+	end
+	return 'global'
+end
+
+local function getPlayerChannelPermissions(source)
+	local result = {}
+	if not constants or type(constants.ChannelList) ~= 'table' then
+		return result
+	end
+
+	for i = 1, #constants.ChannelList do
+		local channel = constants.ChannelList[i]
+		result[channel.id] = canAccessChannel(source, channel.id)
+	end
+
+	return result
 end
 
 local function getDiscordColor(kind, fallback)
@@ -265,7 +608,28 @@ local function setNickname(source, nickname)
 end
 
 local function getRealName(source)
-	return GetPlayerName(source) or '?'
+	local fallback = GetPlayerName(source) or '?'
+	local resolver = constants and constants.AccessDisplayNameResolver or nil
+	if type(resolver) ~= 'function' then
+		return fallback
+	end
+
+	local ok, resolved = pcall(resolver, source, fallback)
+	if not ok then
+		log('warning', ('Display name resolver failed for %s: %s'):format(tostring(source), tostring(resolved)))
+		return fallback
+	end
+
+	if type(resolved) ~= 'string' then
+		return fallback
+	end
+
+	local normalized = resolved:gsub('^%s+', ''):gsub('%s+$', '')
+	if normalized == '' then
+		return fallback
+	end
+
+	return normalized
 end
 
 local function getName(source)
@@ -280,12 +644,36 @@ local function getNameWithId(source)
 	return '[' .. source .. '] ' .. getName(source)
 end
 
+local function registerCommandWithAliases(commandDef, callback, restricted)
+	if type(commandDef) ~= 'table' or commandDef.enabled ~= true then
+		return
+	end
+
+	local names = {}
+	local seen = {}
+	appendUnique(names, seen, commandDef.command)
+
+	for i = 1, #commandDef.aliases do
+		appendUnique(names, seen, commandDef.aliases[i])
+	end
+
+	for i = 1, #names do
+		RegisterCommand(names[i], callback, restricted)
+	end
+end
+
 local function registerNicknameCommand()
-	RegisterCommand('nick', function(source, args)
+	local nickCommand = constants and constants.CommandByKey and constants.CommandByKey.nick or nil
+	if type(nickCommand) ~= 'table' or nickCommand.enabled ~= true then
+		return
+	end
+
+	registerCommandWithAliases(nickCommand, function(source, args)
 		local nickname = args[1] and table.concat(args, ' ')
 
 		if nickname and string.len(nickname) > constants.MaxNicknameLen then
 			TriggerClientEvent('chat:addMessage', source, {
+				channel = constants.DefaultChannelId,
 				color = {255, 0, 0},
 				args = {'Error', 'Nicknames cannot be more than ' .. constants.MaxNicknameLen .. ' characters long'}
 			})
@@ -295,17 +683,20 @@ local function registerNicknameCommand()
 		if setNickname(source, nickname) then
 			if nickname then
 				TriggerClientEvent('chat:addMessage', source, {
+					channel = constants.DefaultChannelId,
 					color = {255, 255, 128},
 					args = {'Your nickname was set to ' .. nickname}
 				})
 			else
 				TriggerClientEvent('chat:addMessage', source, {
+					channel = constants.DefaultChannelId,
 					color = {255, 255, 128},
 					args = {'Your nickname has been unset'}
 				})
 			end
 		else
 			TriggerClientEvent('chat:addMessage', source, {
+				channel = constants.DefaultChannelId,
 				color = {255, 0, 0},
 				args = {'Error', 'Failed to set nickname'}
 			})
@@ -448,8 +839,13 @@ local function setupBootstrap()
 	local typingConfig = Config.TypingIndicator or {}
 	local bubbleConfig = Config.ChatBubbles or {}
 	local discordConfig = Config.Discord or {}
+	local uiConfig = Config.UI or {}
 	local runtimeConfig = Config.Runtime or {}
 	local serverRuntime = type(runtimeConfig.server) == 'table' and runtimeConfig.server or {}
+	local channelsConfig = type(Config.Channels) == 'table' and Config.Channels or {}
+	local commandsConfig = type(Config.Commands) == 'table' and Config.Commands or {}
+	local commandRoutingConfig = type(Config.CommandRouting) == 'table' and Config.CommandRouting or {}
+	local whispersConfig = type(Config.Whispers) == 'table' and Config.Whispers or {}
 
 	local identifierType = tostring(accessConfig.identifier or 'license')
 	local staffChannelAce = tostring(accessConfig.staffChannelAce or 'chat.staffChannel')
@@ -458,11 +854,83 @@ local function setupBootstrap()
 
 	local maxNicknameLen = math.max(1, tonumber(chatConfig.maxNicknameLen) or 30)
 	local printToConsole = chatConfig.printToConsole ~= false
-	local localMessageColor = chatConfig.localColor or {0, 153, 204}
-	local globalMessageColor = chatConfig.globalColor or {212, 175, 55}
-	local staffMessageColor = chatConfig.staffColor or {255, 64, 0}
+	local localMessageColor = normalizeRgbColor(chatConfig.localColor, {0, 153, 204})
+	local globalMessageColor = normalizeRgbColor(chatConfig.globalColor, {212, 175, 55})
+	local staffMessageColor = normalizeRgbColor(chatConfig.staffColor, {255, 64, 0})
 	local actionMessageDistance = tonumber(chatConfig.actionDistance) or 50.0
 	local localMessageDistance = tonumber(chatConfig.localDistance) or 50.0
+
+	local channelList, channelById = buildChannelDefinitions(channelsConfig, chatConfig, accessConfig)
+	local keepLegacyAliases = commandRoutingConfig.keepLegacyAliases ~= false
+	local commandByKey = buildCommandDefinitions(commandsConfig, keepLegacyAliases)
+	local commandNameToKey = buildCommandNameLookup(commandByKey)
+
+	local defaultChannelId = normalizeKey(commandRoutingConfig.defaultChannel) or 'global'
+	if not channelById[defaultChannelId] then
+		if channelById.global then
+			defaultChannelId = 'global'
+		elseif channelList[1] then
+			defaultChannelId = channelList[1].id
+		else
+			defaultChannelId = 'global'
+		end
+	end
+
+	local separateChannelTabs = uiConfig.separateChannelTabs ~= false
+	local singleChannelId = normalizeKey(uiConfig.singleChannelId) or 'local'
+	if not channelById[singleChannelId] then
+		singleChannelId = defaultChannelId
+	end
+
+	local whisperTabEnabled = whispersConfig.separateWhisperTab ~= false
+	local whisperFallbackChannelId = normalizeKey(whispersConfig.fallbackChannel) or defaultChannelId
+	if whisperFallbackChannelId == 'whispers' or not channelById[whisperFallbackChannelId] then
+		whisperFallbackChannelId = defaultChannelId
+	end
+
+	if not whisperTabEnabled then
+		local whispersChannel = channelById.whispers
+		if whispersChannel then
+			whispersChannel.visible = false
+			whispersChannel.cycle = false
+		end
+	end
+
+	if not whisperTabEnabled and defaultChannelId == 'whispers' then
+		defaultChannelId = whisperFallbackChannelId
+	end
+
+	if not separateChannelTabs then
+		if singleChannelId == 'whispers' and not whisperTabEnabled then
+			singleChannelId = whisperFallbackChannelId
+		end
+		if not channelById[singleChannelId] then
+			singleChannelId = defaultChannelId
+		end
+		defaultChannelId = singleChannelId
+	end
+
+	for _, command in pairs(commandByKey) do
+		if not channelById[command.channel] then
+			command.channel = defaultChannelId
+		end
+	end
+
+	local commandRoutingOverrides = buildRoutingOverrides(commandRoutingConfig.overrides, channelById)
+	if not whisperTabEnabled then
+		local whisperRoutingKeys = {'whisper', 'dm', 'msg', 'reply', 'r'}
+		for i = 1, #whisperRoutingKeys do
+			commandRoutingOverrides[whisperRoutingKeys[i]] = whisperFallbackChannelId
+		end
+
+		if commandByKey.whisper then
+			commandByKey.whisper.channel = whisperFallbackChannelId
+		end
+		if commandByKey.reply then
+			commandByKey.reply.channel = whisperFallbackChannelId
+		end
+	end
+	local commandResponseWindowMs = math.max(100, tonumber(commandRoutingConfig.responseWindowMs) or 1500)
 
 	Server.config = {
 		chat = chatConfig,
@@ -470,13 +938,18 @@ local function setupBootstrap()
 		typing = typingConfig,
 		bubble = bubbleConfig,
 		discord = discordConfig,
-		runtime = serverRuntime
+		runtime = serverRuntime,
+		channels = channelsConfig,
+		commands = commandsConfig,
+		commandRouting = commandRoutingConfig,
+		whispers = whispersConfig
 	}
 
 	Server.constants = {
 		IdentifierType = identifierType,
 		StaffChannelAce = staffChannelAce,
 		NoMuteAce = noMuteAce,
+		AccessDisplayNameResolver = type(accessConfig.getDisplayName) == 'function' and accessConfig.getDisplayName or nil,
 		Roles = roles,
 		MaxNicknameLen = maxNicknameLen,
 		PrintToConsole = printToConsole,
@@ -485,7 +958,18 @@ local function setupBootstrap()
 		StaffMessageColor = staffMessageColor,
 		ActionMessageDistance = actionMessageDistance,
 		LocalMessageDistance = localMessageDistance,
-		refreshCommandsDelayMs = math.max(0, tonumber(serverRuntime.refreshCommandsDelayMs) or 500)
+		refreshCommandsDelayMs = math.max(0, tonumber(serverRuntime.refreshCommandsDelayMs) or 500),
+		ChannelList = channelList,
+		ChannelById = channelById,
+		DefaultChannelId = defaultChannelId,
+		CommandByKey = commandByKey,
+		CommandNameToKey = commandNameToKey,
+		CommandRoutingOverrides = commandRoutingOverrides,
+		CommandResponseWindowMs = commandResponseWindowMs,
+		WhisperTabEnabled = whisperTabEnabled,
+		WhisperFallbackChannelId = whisperFallbackChannelId,
+		SeparateChannelTabs = separateChannelTabs,
+		SingleChannelId = singleChannelId
 	}
 
 	constants = Server.constants
@@ -502,6 +986,8 @@ local function setupBootstrap()
 	Server.log = log
 	Server.decodeTableOrEmpty = decodeTableOrEmpty
 	Server.isSet = isSet
+	Server.clampColorChannel = clampColorChannel
+	Server.normalizeRgbColor = normalizeRgbColor
 	Server.toDiscordColor = toDiscordColor
 	Server.getDiscordColor = getDiscordColor
 	Server.isDiscordConfigured = isDiscordConfigured
@@ -511,6 +997,7 @@ local function setupBootstrap()
 	Server.clearIdentifierCache = clearIdentifierCache
 	Server.getIdentifierMap = getIdentifierMap
 	Server.normalizeMessage = normalizeMessage
+	Server.normalizeKey = normalizeKey
 	Server.refreshCommands = refreshCommands
 	Server.getMessageLicense = getMessageLicense
 	Server.triggerClientEventForTargets = triggerClientEventForTargets
@@ -525,6 +1012,11 @@ local function setupBootstrap()
 	Server.getRealName = getRealName
 	Server.getName = getName
 	Server.getNameWithId = getNameWithId
+	Server.getChannelById = getChannelById
+	Server.getDefaultChannelId = getDefaultChannelId
+	Server.canAccessChannel = canAccessChannel
+	Server.getPlayerChannelPermissions = getPlayerChannelPermissions
+	Server.registerCommandWithAliases = registerCommandWithAliases
 	Server.registerNicknameCommand = registerNicknameCommand
 
 	GetIDFromSource = getIdFromSource

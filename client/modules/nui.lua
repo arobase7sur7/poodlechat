@@ -12,6 +12,14 @@ local function ensureContext()
 	return state, constants
 end
 
+local function forwardMessageToNui(raw)
+	local normalized = Client.normalizeMessagePayload(raw)
+	Client.sendNuiMessage({
+		type = 'ON_MESSAGE',
+		message = normalized
+	})
+end
+
 local function registerNuiHandlers()
 	if handlersRegistered then
 		return
@@ -29,34 +37,29 @@ local function registerNuiHandlers()
 			table.insert(args, 1, author)
 		end
 
-		Client.sendNuiMessage({
-			type = 'ON_MESSAGE',
-			message = {
-				color = color,
-				multiline = true,
-				args = args
-			}
+		forwardMessageToNui({
+			channel = constants.defaultChannelId,
+			label = (constants.channelById[constants.defaultChannelId] and constants.channelById[constants.defaultChannelId].label) or 'Global',
+			color = color,
+			multiline = true,
+			args = args
 		})
 	end)
 
 	AddEventHandler('__cfx_internal:serverPrint', function(msg)
 		print(msg)
 
-		Client.sendNuiMessage({
-			type = 'ON_MESSAGE',
-			message = {
-				templateId = 'print',
-				multiline = true,
-				args = {msg}
-			}
+		forwardMessageToNui({
+			channel = constants.defaultChannelId,
+			label = 'Print',
+			templateId = 'print',
+			multiline = true,
+			args = {msg}
 		})
 	end)
 
 	AddEventHandler('chat:addMessage', function(message)
-		Client.sendNuiMessage({
-			type = 'ON_MESSAGE',
-			message = message
-		})
+		forwardMessageToNui(message)
 	end)
 
 	AddEventHandler('chat:addSuggestion', function(name, help, params)
@@ -111,7 +114,12 @@ local function registerNuiHandlers()
 			local r, g, b = 0, 0x99, 255
 
 			if data.message:sub(1, 1) == '/' then
-				ExecuteCommand(data.message:sub(2))
+				local rawCommand = data.message:sub(2)
+				local commandName = rawCommand:match('^(%S+)')
+				if commandName then
+					Client.setCommandContext(commandName)
+				end
+				ExecuteCommand(rawCommand)
 			else
 				TriggerServerEvent('_chat:messageEntered', GetPlayerName(playerId), {r, g, b}, data.message, state.Channel)
 			end
@@ -140,10 +148,28 @@ local function registerNuiHandlers()
 		cb({active = current})
 	end)
 
+	RegisterNUICallback('toggleWhisperSound', function(_, cb)
+		local current = Client.toggleWhisperSound()
+		cb({
+			active = current,
+			volume = tonumber(constants.whisperNotificationVolume) or 0.65
+		})
+	end)
+
+	RegisterNUICallback('toggleAutoScroll', function(_, cb)
+		local current = Client.toggleAutoScroll()
+		cb({active = current})
+	end)
+
+	RegisterNUICallback('playWhisperSound', function(_, cb)
+		Client.playWhisperSound()
+		cb({})
+	end)
+
 	RegisterNUICallback('setChannel', function(data, cb)
-		local name = type(data) == 'table' and constants.channelNameById[data.channelId] or nil
-		if name then
-			Client.SetChannel(name)
+		local requested = type(data) == 'table' and data.channelId or nil
+		if requested then
+			Client.SetChannel(requested)
 		end
 		cb({})
 	end)
@@ -155,6 +181,7 @@ local function registerNuiHandlers()
 
 	RegisterNUICallback('loaded', function(_, cb)
 		TriggerServerEvent('chat:init')
+		TriggerServerEvent('poodlechat:getPermissions')
 		Client.refreshCommands()
 		Client.refreshThemes()
 		state.chatLoaded = true
@@ -170,6 +197,11 @@ local function registerNuiHandlers()
 
 	RegisterNUICallback('getEmojiPanelData', function(_, cb)
 		cb(Client.getEmojiPanelData())
+	end)
+
+	RegisterNUICallback('getWhisperTargets', function(_, cb)
+		TriggerServerEvent('poodlechat:getWhisperTargets')
+		cb({})
 	end)
 
 	RegisterNUICallback('useEmoji', function(data, cb)
@@ -245,6 +277,7 @@ local function registerNuiHandlers()
 				if IsControlPressed(0, constants.chatOpenControl) then
 					state.chatInputActive = true
 					state.chatInputActivating = true
+					TriggerServerEvent('poodlechat:getPermissions')
 
 					Client.sendNuiMessage({
 						type = 'ON_OPEN'

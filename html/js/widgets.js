@@ -41,6 +41,8 @@ function normalizeFeatureState(state) {
 	return {
 		typing: payload.typing || { enabled: false, allowToggle: false, active: false },
 		bubbles: payload.bubbles || { enabled: false, allowToggle: false, active: false },
+		autoScroll: payload.autoScroll || { enabled: true, allowToggle: true, active: true },
+		whisperSound: payload.whisperSound || { enabled: true, allowToggle: true, active: true, volume: 0.65 },
 		distance: payload.distance || { enabled: false }
 	};
 }
@@ -64,6 +66,8 @@ function updateFeatureButtons(state) {
 	const payload = normalizeFeatureState(state);
 	applyToggleButtonState('typing-toggle', payload.typing);
 	applyToggleButtonState('bubbles-toggle', payload.bubbles);
+	applyToggleButtonState('autoscroll-toggle', payload.autoScroll);
+	applyToggleButtonState('whisper-sound-toggle', payload.whisperSound);
 
 	const distanceWidget = document.getElementById('distance-widget');
 	if (distanceWidget && !payload.distance.enabled) {

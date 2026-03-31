@@ -32,6 +32,7 @@ local function registerNetEvents()
 		'poodlechat:globalMessage',
 		'poodlechat:actionMessage',
 		'poodlechat:whisperMessage',
+		'poodlechat:getWhisperTargets',
 		'poodlechat:getPermissions',
 		'poodlechat:report',
 		'poodlechat:mute',

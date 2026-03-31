@@ -40,14 +40,14 @@ This fork differs from older upstream variants in several key ways:
 ensure poodlechat
 ```
 
-3. Delete this line in `server.cfg`: (if not, you will have 2 chat in game) 
+3. Delete or comment this line in `server.cfg`: (if not, you will have 2 chat in game) 
 
 ```cfg
-ensure chat
+# ensure chat
 ```
 
-3. Configure `shared/config.lua`.
-4. If using staff/role permissions, configure ACE rules in `server.cfg`.
+4. Configure `shared/config.lua`.
+5. If using staff/role permissions, configure ACE rules in `server.cfg`.
 
 ## Configuration
 
@@ -100,6 +100,23 @@ Discord integration is optional and webhook-based through `Config.Discord`.
 - `enabled` controls the whole integration.
 - `webhook` is the full webhook URL.
 - `sendLocal`, `sendGlobal`, `sendStaff`, `sendAction`, `sendJoinLeave`, `sendReports` control per-channel forwarding.
+
+### Staff Channel / Staff Tab Setup
+
+Recommended `server.cfg` example (most reliable):
+
+```cfg
+add_ace group.admin chat.staffChannel allow
+add_principal identifier.license:YOUR_LICENSE_HEX group.admin
+```
+
+Direct player ace (without group) also works:
+
+```cfg
+add_ace identifier.license:YOUR_LICENSE_HEX chat.staffChannel allow
+```
+
+Tip: after any ACE/principal change, restart the resource so clients refresh channel visibility.
 
 
 ## Commands

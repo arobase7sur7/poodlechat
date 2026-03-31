@@ -566,6 +566,17 @@ local function getFeatureStatePayload()
 			allowToggle = State.bubbleToggleAllowed,
 			active = State.bubbleDisplayEnabled
 		},
+		autoScroll = {
+			enabled = true,
+			allowToggle = State.autoScrollToggleAllowed == true,
+			active = State.autoScrollEnabled == true
+		},
+		whisperSound = {
+			enabled = true,
+			allowToggle = State.whisperSoundToggleAllowed == true,
+			active = State.whisperSoundEnabled == true,
+			volume = tonumber(constants.whisperNotificationVolume) or 0.65
+		},
 		distance = {
 			enabled = State.distanceEnabled
 		}
@@ -787,10 +798,6 @@ local function setLocalTypingState(active, force)
 		return
 	end
 
-	if not State.typingDisplayEnabled then
-		active = false
-	end
-
 	local now = GetGameTimer()
 	local rate = getTypingUpdateRate()
 	local nextState = active == true
@@ -798,9 +805,10 @@ local function setLocalTypingState(active, force)
 
 	State.localTypingActive = nextState
 	local myServerId = GetPlayerServerId(PlayerId())
+	local shouldRenderLocal = State.typingDisplayEnabled and nextState
 
 	if changed or force or nextState then
-		setTypingOverhead(myServerId, nextState)
+		setTypingOverhead(myServerId, shouldRenderLocal)
 	end
 
 	State.typingRemoteStates[tostring(myServerId)] = nextState
@@ -834,7 +842,6 @@ local function setTypingDisplayEnabled(nextState)
 	sendFeatureState()
 
 	if not State.typingDisplayEnabled then
-		setLocalTypingState(false, true)
 		for key in pairs(State.OverheadMessages) do
 			if key:sub(1, 7) == 'typing-' then
 				removeOverheadMessage(key)
@@ -842,6 +849,7 @@ local function setTypingDisplayEnabled(nextState)
 		end
 	else
 		reapplyRemoteTypingEntries()
+		setTypingOverhead(GetPlayerServerId(PlayerId()), State.localTypingActive == true)
 	end
 
 	return State.typingDisplayEnabled
@@ -901,6 +909,63 @@ local function toggleBubbleDisplay()
 	local value = setBubbleDisplayEnabled(not State.bubbleDisplayEnabled)
 	Client.addChatMessage({255, 255, 128}, 'Chat bubbles', value and 'on' or 'off')
 	return value
+end
+
+local function setWhisperSoundEnabled(nextState)
+	if State.whisperSoundToggleAllowed ~= true then
+		return State.whisperSoundEnabled
+	end
+
+	State.whisperSoundEnabled = nextState == true
+	SetResourceKvp('whisperSoundEnabled', State.whisperSoundEnabled and 'true' or 'false')
+	sendFeatureState()
+
+	return State.whisperSoundEnabled
+end
+
+local function toggleWhisperSound()
+	if State.whisperSoundToggleAllowed ~= true then
+		Client.addChatMessage({255, 0, 0}, 'Error', 'Whisper sound cannot be toggled')
+		return State.whisperSoundEnabled
+	end
+
+	local value = setWhisperSoundEnabled(not State.whisperSoundEnabled)
+	Client.addChatMessage({255, 255, 128}, 'Whisper sound', value and 'on' or 'off')
+	return value
+end
+
+local function setAutoScrollEnabled(nextState)
+	if State.autoScrollToggleAllowed ~= true then
+		return State.autoScrollEnabled
+	end
+
+	State.autoScrollEnabled = nextState == true
+	SetResourceKvp('chatAutoScrollEnabled', State.autoScrollEnabled and 'true' or 'false')
+	sendFeatureState()
+
+	return State.autoScrollEnabled
+end
+
+local function toggleAutoScroll()
+	if State.autoScrollToggleAllowed ~= true then
+		Client.addChatMessage({255, 0, 0}, 'Error', 'Auto-scroll cannot be toggled')
+		return State.autoScrollEnabled
+	end
+
+	local value = setAutoScrollEnabled(not State.autoScrollEnabled)
+	Client.addChatMessage({255, 255, 128}, 'Auto-scroll', value and 'on' or 'off')
+	return value
+end
+
+local function playWhisperSound()
+	if State.whisperSoundEnabled ~= true then
+		return false
+	end
+
+	local soundName = tostring(constants.whisperNotificationSoundName or 'SELECT')
+	local soundSet = tostring(constants.whisperNotificationSoundSet or 'HUD_FRONTEND_DEFAULT_SOUNDSET')
+	PlaySoundFrontend(-1, soundName, soundSet, true)
+	return true
 end
 
 local function registerFeatureHandlers()
@@ -1025,6 +1090,11 @@ Client.removeOverheadMessage = removeOverheadMessage
 Client.setLocalTypingState = setLocalTypingState
 Client.toggleTypingDisplay = toggleTypingDisplay
 Client.toggleBubbleDisplay = toggleBubbleDisplay
+Client.toggleWhisperSound = toggleWhisperSound
+Client.toggleAutoScroll = toggleAutoScroll
+Client.playWhisperSound = playWhisperSound
+Client.setWhisperSoundEnabled = setWhisperSoundEnabled
+Client.setAutoScrollEnabled = setAutoScrollEnabled
 Client.setTypingDisplayEnabled = setTypingDisplayEnabled
 Client.setBubbleDisplayEnabled = setBubbleDisplayEnabled
 Client.registerFeatureHandlers = registerFeatureHandlers

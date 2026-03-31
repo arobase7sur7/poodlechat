@@ -15,81 +15,203 @@
 
   <script type="text/x-template" id="app_template">
     <div id="chat-root" @keyup.esc="hideInput">
-      <div class="chat-window" :style="this.style" :class="{ 'fadeOut animated': !showWindow, 'hidden': shouldHide }">
-        <div class="chat-messages" ref="messages">
-          <message v-for="msg in messages"
-                   :templates="templates"
-                   :multiline="msg.multiline"
-                   :args="msg.args"
-                   :color="msg.color"
-                   :template="msg.template"
-                   :template-id="msg.templateId"
-                   :key="msg">
-          </message>
-        </div>
-      </div>
-      <div class="chat-input" v-show="showInput">
-        <div class="input-shell">
-          <div class="chat-header">
-            <div class="channels">
-              <div class="channel tab active-tab" id="channel-local">Local</div>
-              <div class="channel tab" id="channel-global">Global</div>
-              <div class="channel tab" id="channel-staff">Staff</div>
-              <div class="tab" id="cycle-instructions">Tab</div>
-              <div class="tab" id="emoji-toggle">😀</div>
+      <div class="chat-shell" :style="this.style" :class="{ 'fadeOut animated': !showWindow, 'hidden': shouldHide }">
+        <div class="chat-window">
+          <div v-if="!isWhispersActive" class="chat-messages" ref="messages">
+            <message v-for="msg in currentMessages"
+                     :templates="templates"
+                     :multiline="msg.multiline"
+                     :args="msg.args"
+                     :color="msg.color"
+                     :template="msg.template"
+                     :template-id="msg.templateId"
+                     :key="msg._id">
+            </message>
+          </div>
+          <div v-else class="chat-messages whispers-layout">
+            <div
+              class="whisper-sidebar no-focus"
+              :class="{ collapsed: isWhisperSidebarCollapsed }"
+              tabindex="-1"
+            >
+              <div class="whisper-sidebar-header">
+                <div class="whisper-sidebar-title">Conversations</div>
+                <div class="whisper-sidebar-actions">
+                  <button
+                    type="button"
+                    class="whisper-header-btn no-focus whisper-header-icon"
+                    @click.stop="toggleWhisperPicker"
+                    title="New whisper"
+                    tabindex="-1"
+                  >
+                    <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                      <path d="M12 5v14"></path>
+                      <path d="M5 12h14"></path>
+                    </svg>
+                  </button>
+                  <button
+                    v-if="whisperSidebarCollapsible"
+                    type="button"
+                    class="whisper-header-btn no-focus whisper-header-icon"
+                    :class="{ active: isWhisperSidebarCollapsed }"
+                    @click.stop="toggleWhisperSidebarMode"
+                    :title="isWhisperSidebarCollapsed ? 'Folded sidebar mode enabled' : 'Folded sidebar mode disabled'"
+                    tabindex="-1"
+                  >
+                    <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+                      <path d="M4 12h16"></path>
+                      <path d="M10 7l-5 5 5 5"></path>
+                      <path d="M14 7l5 5-5 5"></path>
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div v-if="whisperPickerOpen" class="whisper-picker">
+                <div class="whisper-picker-title">Players</div>
+                <div class="whisper-picker-list no-focus" tabindex="-1">
+                  <button
+                    v-for="player in whisperTargets"
+                    :key="player.id"
+                    type="button"
+                    class="whisper-picker-item no-focus"
+                    @click="startWhisperConversation(player)"
+                    tabindex="-1"
+                  >
+                    <span class="whisper-picker-main">{{ player.name || player.label || ('[' + player.id + ']') }}</span>
+                    <span class="whisper-picker-sub">ID {{ player.id }}<template v-if="player.fivemName"> | {{ player.fivemName }}</template></span>
+                  </button>
+                  <div v-if="whisperTargets.length === 0" class="whisper-picker-empty">No players available.</div>
+                </div>
+              </div>
+              <button
+                v-for="conversation in whisperConversationList"
+                :key="conversation.id"
+                type="button"
+                class="whisper-conversation"
+                :class="{ active: activeWhisperConversationId === conversation.id }"
+                @click="selectWhisperConversation(conversation.id)"
+                tabindex="-1"
+              >
+                <span class="whisper-peer whisper-peer-full">{{ conversation.peerName }}</span>
+                <span class="whisper-peer whisper-peer-compact">#{{ conversation.peerShortId }}</span>
+                <span v-if="conversation.unread > 0" class="whisper-unread-dot"></span>
+                <span
+                  class="whisper-close no-focus"
+                  @click.stop="closeWhisperConversation(conversation.id)"
+                  title="Close conversation"
+                >
+                  x
+                </span>
+              </button>
             </div>
-            <div class="control-rail">
-              <button class="tool-btn icon-btn no-focus" id="distance-widget" type="button" tabindex="-1" title="Cycle distance">
-                <span class="btn-icon" aria-hidden="true">
-                  <svg class="tool-svg" viewBox="0 0 24 24" focusable="false">
-                    <path d="M4 10h4l5-4v12l-5-4H4z"></path>
-                    <path d="M16 9.5a4.5 4.5 0 0 1 0 5"></path>
-                    <path d="M18.8 7a8 8 0 0 1 0 10"></path>
-                  </svg>
-                </span>
-                <span class="distance-meter" aria-hidden="true">
-                  <svg class="meter-svg" viewBox="0 0 100 10" preserveAspectRatio="none" focusable="false">
-                    <rect class="meter-track" x="0" y="0" width="100" height="10" rx="5"></rect>
-                    <rect id="distance-fill" class="meter-fill" x="0" y="0" width="0" height="10" rx="5"></rect>
-                  </svg>
-                </span>
-                <span id="distance-label" class="distance-label">Distance</span>
-              </button>
-              <button class="tool-btn icon-btn no-focus" id="typing-toggle" type="button" tabindex="-1" title="Toggle typing indicator">
-                <span class="btn-icon" aria-hidden="true">
-                  <svg class="tool-svg" viewBox="0 0 24 24" focusable="false">
-                    <rect x="4" y="7" width="16" height="10" rx="5"></rect>
-                    <circle cx="9" cy="12" r="1.2"></circle>
-                    <circle cx="12" cy="12" r="1.2"></circle>
-                    <circle cx="15" cy="12" r="1.2"></circle>
-                  </svg>
-                </span>
-              </button>
-              <button class="tool-btn icon-btn no-focus" id="bubbles-toggle" type="button" tabindex="-1" title="Toggle bubbles">
-                <span class="btn-icon" aria-hidden="true">
-                  <svg class="tool-svg" viewBox="0 0 24 24" focusable="false">
-                    <path d="M4 5h16v10H9l-5 4v-4H4z"></path>
-                  </svg>
-                </span>
-              </button>
+            <div class="whisper-thread" ref="whisperMessages">
+              <message v-for="msg in activeWhisperMessages"
+                       :templates="templates"
+                       :multiline="msg.multiline"
+                       :args="msg.args"
+                       :color="msg.color"
+                       :template="msg.template"
+                       :template-id="msg.templateId"
+                       :key="msg._id">
+              </message>
+              <div v-if="activeWhisperMessages.length === 0" class="whisper-empty">
+                No conversation selected.
+              </div>
             </div>
           </div>
-          <div class="prefix">➤</div>
-          <textarea v-model="message"
-                    ref="input"
-                    type="text"
-                    autofocus
-                    spellcheck="false"
-                    @keyup="keyUp"
-                    @keydown="keyDown"
-                    @keypress.enter.prevent="send">
-          </textarea>
         </div>
-        <suggestions :message="message" :suggestions="suggestions"></suggestions>
-        <div id="emoji-window">
-          <div id="emoji-tabs" class="no-focus" tabindex="-1"></div>
-          <input id="emoji-search" type="text" placeholder="Search..." tabindex="-1">
-          <div id="emoji-list" class="no-focus" tabindex="-1"></div>
+        <div class="chat-input" v-show="showInput">
+          <div class="input-shell">
+            <div class="chat-header">
+              <div class="channels">
+                <div class="channels-scroll no-focus" tabindex="-1">
+                  <button
+                    v-for="channel in visibleChannels"
+                    :key="channel.id"
+                    type="button"
+                    class="channel tab no-focus"
+                    :class="{ 'active-tab': activeChannelId === channel.id }"
+                    :style="{ color: channelColor(channel) }"
+                    :title="channel.label"
+                    @click="selectChannel(channel.id)"
+                    tabindex="-1"
+                  >
+                    <span class="channel-label">{{ channel.label }}</span>
+                    <span v-if="channelUnread(channel.id) > 0" class="channel-unread-dot"></span>
+                  </button>
+                </div>
+                <div v-if="separateChannelTabs && visibleChannels.length > 1" class="tab" id="cycle-instructions">Tab</div>
+                <div class="tab" id="emoji-toggle">&#128512;</div>
+              </div>
+              <div class="control-rail">
+                <button class="tool-btn icon-btn no-focus" id="distance-widget" type="button" tabindex="-1" title="Cycle distance">
+                  <span class="btn-icon" aria-hidden="true">
+                    <svg class="tool-svg" viewBox="0 0 24 24" focusable="false">
+                      <path d="M4 10h4l5-4v12l-5-4H4z"></path>
+                      <path d="M16 9.5a4.5 4.5 0 0 1 0 5"></path>
+                      <path d="M18.8 7a8 8 0 0 1 0 10"></path>
+                    </svg>
+                  </span>
+                  <span class="distance-meter" aria-hidden="true">
+                    <svg class="meter-svg" viewBox="0 0 100 10" preserveAspectRatio="none" focusable="false">
+                      <rect class="meter-track" x="0" y="0" width="100" height="10" rx="5"></rect>
+                      <rect id="distance-fill" class="meter-fill" x="0" y="0" width="0" height="10" rx="5"></rect>
+                    </svg>
+                  </span>
+                  <span id="distance-label" class="distance-label">Distance</span>
+                </button>
+                <button class="tool-btn icon-btn no-focus" id="typing-toggle" type="button" tabindex="-1" title="Toggle typing indicator">
+                  <span class="btn-icon" aria-hidden="true">
+                    <svg class="tool-svg" viewBox="0 0 24 24" focusable="false">
+                      <rect x="4" y="7" width="16" height="10" rx="5"></rect>
+                      <circle cx="9" cy="12" r="1.2"></circle>
+                      <circle cx="12" cy="12" r="1.2"></circle>
+                      <circle cx="15" cy="12" r="1.2"></circle>
+                    </svg>
+                  </span>
+                </button>
+                <button class="tool-btn icon-btn no-focus" id="bubbles-toggle" type="button" tabindex="-1" title="Toggle bubbles">
+                  <span class="btn-icon" aria-hidden="true">
+                    <svg class="tool-svg" viewBox="0 0 24 24" focusable="false">
+                      <path d="M4 5h16v10H9l-5 4v-4H4z"></path>
+                    </svg>
+                  </span>
+                </button>
+                <button class="tool-btn icon-btn no-focus" id="autoscroll-toggle" type="button" tabindex="-1" title="Toggle auto-scroll">
+                  <span class="btn-icon" aria-hidden="true">
+                    <svg class="tool-svg" viewBox="0 0 24 24" focusable="false">
+                      <path d="M12 5v13"></path>
+                      <path d="M7.5 13.5L12 18l4.5-4.5"></path>
+                    </svg>
+                  </span>
+                </button>
+                <button class="tool-btn icon-btn no-focus" id="whisper-sound-toggle" type="button" tabindex="-1" title="Toggle whisper sound">
+                  <span class="btn-icon" aria-hidden="true">
+                    <svg class="tool-svg" viewBox="0 0 24 24" focusable="false">
+                      <path d="M14 5L9.5 9H6v6h3.5l4.5 4z"></path>
+                      <path d="M17 9.5a3.5 3.5 0 0 1 0 5"></path>
+                    </svg>
+                  </span>
+                </button>
+              </div>
+            </div>
+            <div class="prefix">&gt;</div>
+            <textarea v-model="message"
+                      ref="input"
+                      type="text"
+                      autofocus
+                      spellcheck="false"
+                      @keyup="keyUp"
+                      @keydown="keyDown"
+                      @keypress.enter.prevent="send">
+            </textarea>
+          </div>
+          <suggestions :message="message" :suggestions="suggestions"></suggestions>
+          <div id="emoji-window">
+            <div id="emoji-tabs" class="no-focus" tabindex="-1"></div>
+            <input id="emoji-search" type="text" placeholder="Search..." tabindex="-1">
+            <div id="emoji-list" class="no-focus" tabindex="-1"></div>
+          </div>
         </div>
       </div>
     </div>
