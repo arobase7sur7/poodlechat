@@ -5,6 +5,7 @@ name "PoodleChat"
 description "Chat resource optimized and reworked"
 author "kibukj (made the original version), arobase7sur7 "
 repository "https://github.com/arobase7sur7/poodlechat"
+version "1.2.1"
 
 files {
 	"html/index.html",
