@@ -143,12 +143,39 @@ Default profile:
 Server exports:
 
 - `exports['poodlechat']:SendChannelMessage(target, payload)`
+  - `target`: player target(s). Accepts a single player id (`number`/`string`), a list of ids (`table`), or broadcast (`nil`/`-1`).
+  - `payload`: message envelope table.
+  - `payload.channel`: optional channel id (`'global'`, `'local'`, `'staff'`, etc.). Falls back automatically if invalid/inaccessible.
+  - `payload.label`: optional author/header label used when `payload.args` is not provided.
+  - `payload.text`: optional message text used when `payload.args` is not provided.
+  - `payload.args`: optional explicit chat args array passed to chat template (example: `{ '[Staff] Admin', 'Message' }`).
+  - `payload.color`: optional RGB table `{r, g, b}`.
+  - `payload.template`: optional custom chat template string.
+  - `payload.templateId`: optional UI template id.
+  - `payload.multiline`: optional boolean; defaults to `true`.
+  - `payload.metadata`: optional extra metadata table.
+  - Returns `true` if at least one target received processing, otherwise `false`.
 - `exports['poodlechat']:SendBubbleMessage(sourceId, text)`
+  - `sourceId`: player id the bubble should appear above.
+  - `text`: bubble text (normalized and length-limited by config).
+  - Returns `true` on accepted input, otherwise `false`.
 
 Client exports:
 
 - `exports['poodlechat']:AddChannelMessage(payload)`
+  - `payload.channel`: optional target channel id.
+  - `payload.label`: optional fallback label.
+  - `payload.text` / `payload.message`: optional fallback text when `payload.args` is not provided.
+  - `payload.args`: optional explicit chat args array.
+  - `payload.color`: optional RGB table `{r, g, b}`.
+  - `payload.template`: optional custom chat template string.
+  - `payload.templateId`: optional UI template id.
+  - `payload.multiline`: optional boolean; defaults to `true`.
+  - `payload.metadata`: optional extra metadata table.
+  - Returns `(true, resolvedChannelId)`.
 - `exports['poodlechat']:SetChannel(channelId)`
+  - `channelId`: requested channel id to switch to.
+  - Returns `(true, resolvedChannelId)`.
 
 Behavior notes:
 

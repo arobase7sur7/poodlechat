@@ -4,6 +4,15 @@ Config = {
 		maxNicknameLen = 125
 	},
 	channels = {
+		radio = {
+			label = 'Radio',
+			color = {255, 0, 255},
+			history = 250,
+			visible = true,
+			cycle = true,
+			scope = 'proximity',
+			distance = 0.0
+		},
 		["local"] = {
 			label = 'RP',
 			color = {0, 153, 204},
