@@ -158,6 +158,16 @@ local function registerNuiHandlers()
 				end
 				ExecuteCommand(rawCommand)
 			else
+				if Client.canSendToChannel and not Client.canSendToChannel(state.Channel) then
+					forwardMessageToNui({
+						channel = state.Channel or constants.defaultChannelId,
+						label = 'System',
+						color = {255, 128, 128},
+						args = {'System', 'You cannot send messages in this channel.'}
+					})
+					return 'ok'
+				end
+
 				TriggerServerEvent('_chat:messageEntered', GetPlayerName(playerId), {r, g, b}, message, state.Channel)
 			end
 		end

@@ -20,6 +20,24 @@ local function getChannel(channelId)
 	return constants.ChannelById[constants.DefaultChannelId]
 end
 
+local function canSendToChannel(source, channelId)
+	local id = Server.normalizeKey(channelId)
+	if not id then
+		return false
+	end
+
+	local channel = constants.ChannelById[id]
+	if not channel then
+		return false
+	end
+
+	if not Server.canAccessChannel(source, id) then
+		return false
+	end
+
+	return channel.canSend ~= false
+end
+
 local function buildEnvelope(channelId, payload)
 	local channel = getChannel(channelId)
 	local label = tostring(payload.label or channel.label or channel.id)
@@ -545,6 +563,11 @@ local function registerChatHandlers()
 		end
 
 		local channelId = getMessageChannelForInput(source, channel)
+		if not canSendToChannel(source, channelId) then
+			sendSystemMessage(source, 'You cannot send messages in this channel.', {255, 128, 128}, channelId)
+			return
+		end
+
 		TriggerEvent('chatMessage', source, author, message, channelId)
 
 		if WasEventCanceled() then

@@ -157,6 +157,10 @@ window.APP = {
 		isWhispersActive() {
 			return this.whisperTabEnabled && this.activeChannelId === 'whispers';
 		},
+		activeChannelCanSend() {
+			const channel = this.channelById(this.activeChannelId);
+			return !!channel && channel.canSend !== false;
+		},
 		whisperConversationList() {
 			return Object.values(this.whisperConversations)
 				.filter((conversation) => this.hiddenWhisperConversations[conversation.id] !== true)
@@ -398,6 +402,7 @@ window.APP = {
 					order: Number.isFinite(Number(channel.order)) ? Number(channel.order) : 100,
 					visible: (this.whisperTabEnabled || String(channel.id) !== 'whispers') ? channel.visible !== false : false,
 					cycle: channel.cycle !== false,
+					canSend: channel.canSend !== false,
 					maxHistory: normalizeLimit(channel.maxHistory, 250),
 					allowed: channel.allowed !== false
 				}));
@@ -931,6 +936,10 @@ window.APP = {
 		send() {
 			if (this.message !== '') {
 				const original = this.message;
+				if (original.charAt(0) !== '/' && !this.activeChannelCanSend) {
+					return;
+				}
+
 				let outgoing = original;
 				if (this.whisperTabEnabled && this.isWhispersActive && original.charAt(0) !== '/' && this.activeWhisperConversationId) {
 					const conversation = this.whisperConversations[this.activeWhisperConversationId];

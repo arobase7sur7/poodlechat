@@ -277,6 +277,7 @@ local function buildChannelDefinitions(channelsConfig, defaultStaffAce)
 			order = 10,
 			visible = true,
 			cycle = true,
+			canSend = true,
 			requiresAce = nil,
 			maxHistory = 250,
 			scope = 'proximity',
@@ -288,6 +289,7 @@ local function buildChannelDefinitions(channelsConfig, defaultStaffAce)
 			order = 20,
 			visible = true,
 			cycle = true,
+			canSend = true,
 			requiresAce = nil,
 			maxHistory = 300,
 			scope = 'global',
@@ -299,6 +301,7 @@ local function buildChannelDefinitions(channelsConfig, defaultStaffAce)
 			order = 30,
 			visible = true,
 			cycle = true,
+			canSend = true,
 			requiresAce = tostring(defaultStaffAce or 'chat.staffChannel'),
 			maxHistory = 250,
 			scope = 'permission',
@@ -310,6 +313,7 @@ local function buildChannelDefinitions(channelsConfig, defaultStaffAce)
 			order = 40,
 			visible = true,
 			cycle = true,
+			canSend = true,
 			requiresAce = nil,
 			maxHistory = 250,
 			scope = 'whisper',
@@ -329,6 +333,7 @@ local function buildChannelDefinitions(channelsConfig, defaultStaffAce)
 			order = tonumber(override.order) or defaultEntry.order,
 			visible = override.visible ~= false,
 			cycle = override.cycle ~= false,
+			canSend = override.canSend ~= false,
 			requiresAce = type(explicitPermission) == 'string' and explicitPermission ~= '' and explicitPermission or defaultEntry.requiresAce,
 			maxHistory = normalizeHistoryLimit(override.history, defaultEntry.maxHistory),
 			scope = normalizeKey(override.scope) or defaultEntry.scope,
@@ -347,6 +352,7 @@ local function buildChannelDefinitions(channelsConfig, defaultStaffAce)
 				order = tonumber(rawEntry.order) or 100,
 				visible = rawEntry.visible ~= false,
 				cycle = rawEntry.cycle ~= false,
+				canSend = rawEntry.canSend ~= false,
 				requiresAce = type(explicitPermission) == 'string' and explicitPermission ~= '' and explicitPermission or nil,
 				maxHistory = normalizeHistoryLimit(rawEntry.history, 250),
 				scope = normalizeKey(rawEntry.scope) or 'global',
@@ -552,6 +558,29 @@ local function canAccessChannel(channelId)
 	end
 
 	return allowed == true
+end
+
+local function canSendToChannel(channelId)
+	local constants = Client.constants
+	if not constants or not constants.channelById then
+		return false
+	end
+
+	local normalized = normalizeKey(channelId)
+	if not normalized then
+		return false
+	end
+
+	if not canAccessChannel(normalized) then
+		return false
+	end
+
+	local channel = constants.channelById[normalized]
+	if not channel then
+		return false
+	end
+
+	return channel.canSend ~= false
 end
 
 local function setupBootstrap()
@@ -860,3 +889,4 @@ Client.resolveCommandChannel = resolveCommandChannel
 Client.setCommandContext = setCommandContext
 Client.getActiveCommandContextChannel = getActiveCommandContextChannel
 Client.canAccessChannel = canAccessChannel
+Client.canSendToChannel = canSendToChannel

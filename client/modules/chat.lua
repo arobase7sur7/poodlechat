@@ -386,6 +386,7 @@ local function getAllowedChannelsPayload()
 			order = entry.order,
 			visible = entry.visible,
 			cycle = entry.cycle,
+			canSend = entry.canSend,
 			maxHistory = entry.maxHistory,
 			allowed = Client.canAccessChannel(entry.id)
 		}

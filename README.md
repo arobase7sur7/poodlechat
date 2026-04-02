@@ -57,9 +57,11 @@ Each channel entry supports:
 
 - `label`
 - `color`
+- `order`
 - `history`
 - `visible`
 - `cycle`
+- `canSend` (`false` makes a read-only tab that can receive messages but not send plain chat input)
 - `scope`
 - `distance` (for proximity channels)
 - `permission` (for restricted channels)
