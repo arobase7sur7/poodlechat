@@ -34,7 +34,6 @@ Client.netEvents = {
 local legacyCommandAliases = {
 	global = {'global', 'g'},
 	say = {'say'},
-	ooc = {'ooc', 'b'},
 	me = {'me'},
 	staff = {'staff'},
 	whisper = {'whisper', 'w', 'msg', 'dm'},
@@ -270,43 +269,51 @@ local function normalizeHistoryLimit(value, fallback)
 	return number
 end
 
-local function buildChannelDefinitions(channelsConfig, chatConfig, accessConfig)
+local function buildChannelDefinitions(channelsConfig, defaultStaffAce)
 	local defaults = {
 		["local"] = {
 			label = 'Local',
-			color = chatConfig.localColor or {0, 153, 204},
+			color = {0, 153, 204},
 			order = 10,
 			visible = true,
 			cycle = true,
 			requiresAce = nil,
-			maxHistory = 250
+			maxHistory = 250,
+			scope = 'proximity',
+			distance = 50.0
 		},
 		global = {
 			label = 'Global',
-			color = chatConfig.globalColor or {212, 175, 55},
+			color = {212, 175, 55},
 			order = 20,
 			visible = true,
 			cycle = true,
 			requiresAce = nil,
-			maxHistory = 300
+			maxHistory = 300,
+			scope = 'global',
+			distance = nil
 		},
 		staff = {
 			label = 'Staff',
-			color = chatConfig.staffColor or {255, 64, 0},
+			color = {255, 64, 0},
 			order = 30,
 			visible = true,
 			cycle = true,
-			requiresAce = tostring(accessConfig.staffChannelAce or 'chat.staffChannel'),
-			maxHistory = 250
+			requiresAce = tostring(defaultStaffAce or 'chat.staffChannel'),
+			maxHistory = 250,
+			scope = 'permission',
+			distance = nil
 		},
 		whispers = {
 			label = 'Whispers',
-			color = chatConfig.whisperColor or {254, 127, 156},
+			color = {254, 127, 156},
 			order = 40,
 			visible = true,
 			cycle = true,
 			requiresAce = nil,
-			maxHistory = 250
+			maxHistory = 250,
+			scope = 'whisper',
+			distance = nil
 		}
 	}
 
@@ -314,6 +321,7 @@ local function buildChannelDefinitions(channelsConfig, chatConfig, accessConfig)
 
 	for channelId, defaultEntry in pairs(defaults) do
 		local override = type(channelsConfig[channelId]) == 'table' and channelsConfig[channelId] or {}
+		local explicitPermission = override.permission
 		merged[channelId] = {
 			id = channelId,
 			label = tostring(override.label or defaultEntry.label),
@@ -321,14 +329,17 @@ local function buildChannelDefinitions(channelsConfig, chatConfig, accessConfig)
 			order = tonumber(override.order) or defaultEntry.order,
 			visible = override.visible ~= false,
 			cycle = override.cycle ~= false,
-			requiresAce = type(override.requiresAce) == 'string' and override.requiresAce ~= '' and override.requiresAce or defaultEntry.requiresAce,
-			maxHistory = normalizeHistoryLimit(override.maxHistory, defaultEntry.maxHistory)
+			requiresAce = type(explicitPermission) == 'string' and explicitPermission ~= '' and explicitPermission or defaultEntry.requiresAce,
+			maxHistory = normalizeHistoryLimit(override.history, defaultEntry.maxHistory),
+			scope = normalizeKey(override.scope) or defaultEntry.scope,
+			distance = tonumber(override.distance) or defaultEntry.distance
 		}
 	end
 
 	for rawId, rawEntry in pairs(channelsConfig) do
 		local channelId = normalizeKey(rawId)
 		if channelId and type(rawEntry) == 'table' and not merged[channelId] then
+			local explicitPermission = rawEntry.permission
 			merged[channelId] = {
 				id = channelId,
 				label = tostring(rawEntry.label or channelId),
@@ -336,8 +347,10 @@ local function buildChannelDefinitions(channelsConfig, chatConfig, accessConfig)
 				order = tonumber(rawEntry.order) or 100,
 				visible = rawEntry.visible ~= false,
 				cycle = rawEntry.cycle ~= false,
-				requiresAce = type(rawEntry.requiresAce) == 'string' and rawEntry.requiresAce ~= '' and rawEntry.requiresAce or nil,
-				maxHistory = normalizeHistoryLimit(rawEntry.maxHistory, 250)
+				requiresAce = type(explicitPermission) == 'string' and explicitPermission ~= '' and explicitPermission or nil,
+				maxHistory = normalizeHistoryLimit(rawEntry.history, 250),
+				scope = normalizeKey(rawEntry.scope) or 'global',
+				distance = tonumber(rawEntry.distance)
 			}
 		end
 	end
@@ -546,27 +559,97 @@ local function setupBootstrap()
 		return
 	end
 
-	local chatConfig = Config.Chat or {}
-	local uiConfig = Config.UI or {}
-	local emojiConfig = Config.Emoji or {}
-	local typingConfig = Config.TypingIndicator or {}
-	local bubbleConfig = Config.ChatBubbles or {}
-	local distanceConfig = Config.Distance or {}
-	local distanceUiConfig = type(distanceConfig.ui) == 'table' and distanceConfig.ui or {}
-	local runtimeConfig = Config.Runtime or {}
+	local rootConfig = type(Config) == 'table' and Config or {}
+	local settingsConfig = type(rootConfig.settings) == 'table' and rootConfig.settings or {}
+	local uiConfig = type(rootConfig.ui) == 'table' and rootConfig.ui or {}
+	local uiOverheadConfig = type(uiConfig.overhead) == 'table' and uiConfig.overhead or {}
+	local emojiConfig = type(rootConfig.emoji) == 'table' and rootConfig.emoji or {}
+	local featureConfig = type(rootConfig.features) == 'table' and rootConfig.features or {}
+	local rawTypingConfig = type(featureConfig.typing) == 'table' and featureConfig.typing or {}
+	local rawBubbleConfig = type(featureConfig.bubbles) == 'table' and featureConfig.bubbles or {}
+	local rawDistanceConfig = type(rootConfig.distance) == 'table' and rootConfig.distance or {}
+	local distanceUiRoot = type(rawDistanceConfig.ui) == 'table' and rawDistanceConfig.ui or {}
+	local runtimeConfig = type(rootConfig.runtime) == 'table' and rootConfig.runtime or {}
 	local clientRuntime = type(runtimeConfig.client) == 'table' and runtimeConfig.client or {}
-	local accessConfig = Config.Access or {}
-	local channelsConfig = type(Config.Channels) == 'table' and Config.Channels or {}
-	local commandsConfig = type(Config.Commands) == 'table' and Config.Commands or {}
-	local commandRoutingConfig = type(Config.CommandRouting) == 'table' and Config.CommandRouting or {}
-	local whispersConfig = type(Config.Whispers) == 'table' and Config.Whispers or {}
+	local accessConfig = type(rootConfig.access) == 'table' and rootConfig.access or {}
+	local channelsConfig = type(rootConfig.channels) == 'table' and rootConfig.channels or {}
+	local commandsConfig = type(rootConfig.commands) == 'table' and rootConfig.commands or {}
+	local routingConfig = type(rootConfig.routing) == 'table' and rootConfig.routing or {}
+	local whispersConfig = type(rootConfig.whispers) == 'table' and rootConfig.whispers or {}
+	local messagesConfig = type(rootConfig.messages) == 'table' and rootConfig.messages or {}
+	local actionMessageConfig = type(messagesConfig.action) == 'table' and messagesConfig.action or {}
 
-	local channelList, channelById, channelIdByName, channelNameById = buildChannelDefinitions(channelsConfig, chatConfig, accessConfig)
-	local keepLegacyAliases = commandRoutingConfig.keepLegacyAliases ~= false
+	uiConfig.displayOverheadByDefault = uiOverheadConfig.enabledByDefault == true
+	uiConfig.overheadDistance = tonumber(uiOverheadConfig.distance) or tonumber(uiConfig.overheadDistance) or 50.0
+	uiConfig.overheadMinMs = tonumber(uiOverheadConfig.minMs) or tonumber(uiConfig.overheadMinMs) or 5000
+	uiConfig.overheadMaxMs = tonumber(uiOverheadConfig.maxMs) or tonumber(uiConfig.overheadMaxMs) or 10000
+	uiConfig.overheadPerCharMs = tonumber(uiOverheadConfig.perCharMs) or tonumber(uiConfig.overheadPerCharMs) or 200
+	uiConfig.overheadUpdateMs = tonumber(uiOverheadConfig.updateMs) or tonumber(uiConfig.overheadUpdateMs) or 50
+
+	local typingConfig = {
+		enabled = rawTypingConfig.enabled == true,
+		allowPlayerToggle = rawTypingConfig.allowToggle == true,
+		maxDistance = tonumber(rawTypingConfig.maxDistance) or 25.0,
+		updateRate = tonumber(rawTypingConfig.updateRate) or 200,
+		style = tostring(rawTypingConfig.style or 'dots'),
+		offset = rawTypingConfig.offset,
+		headTracking = rawTypingConfig.headTracking == true,
+		headLift = tonumber(rawTypingConfig.headLift),
+		screenLift = tonumber(rawTypingConfig.screenLift) or 0.0
+	}
+
+	local bubbleConfig = {
+		enabled = rawBubbleConfig.enabled == true,
+		allowPlayerToggle = rawBubbleConfig.allowToggle == true,
+		maxDistance = tonumber(rawBubbleConfig.maxDistance) or 25.0,
+		fadeOutTime = tonumber(rawBubbleConfig.fadeOutMs) or 4000,
+		maxLength = tonumber(rawBubbleConfig.maxLength) or 80,
+		use3DText = rawBubbleConfig.use3DText ~= false,
+		offset = rawBubbleConfig.offset
+	}
+
+	local modeLevels = {}
+	local modeRanges = {}
+	local configuredModes = type(rawDistanceConfig.modes) == 'table' and rawDistanceConfig.modes or {}
+	for i = 1, #configuredModes do
+		local mode = configuredModes[i]
+		local distanceValue = tonumber(mode.distance)
+		if distanceValue and distanceValue > 0 then
+			modeRanges[#modeRanges + 1] = distanceValue
+			modeLevels[#modeLevels + 1] = {
+				id = normalizeKey(mode.id) or tostring(mode.id or ''),
+				priority = i,
+				label = tostring(mode.label or mode.id or ('Mode ' .. i)),
+				color = tostring(mode.color or '#95a5a6'),
+				range = distanceValue
+			}
+		end
+	end
+
+	local distanceConfig = {
+		enabled = rawDistanceConfig.enabled == true,
+		default = tonumber(rawDistanceConfig.default) or 10.0,
+		pollRate = tonumber(rawDistanceConfig.pollRate) or 500,
+		getDistance = rawDistanceConfig.getCurrent,
+		getLabel = rawDistanceConfig.getLabel,
+		setDistance = rawDistanceConfig.setCurrent,
+		ranges = modeRanges,
+		ui = {
+			override = distanceUiRoot.useModeLabels ~= false,
+			mode = 'priority',
+			dynamic = distanceUiRoot.dynamic == true,
+			levels = modeLevels
+		}
+	}
+
+	local distanceUiConfig = distanceConfig.ui
+
+	local channelList, channelById, channelIdByName, channelNameById = buildChannelDefinitions(channelsConfig, accessConfig.staffChannelAce)
+	local keepLegacyAliases = routingConfig.keepLegacyAliases == true
 	local commandByKey = buildCommandDefinitions(commandsConfig, keepLegacyAliases)
 	local commandNameToKey = buildCommandNameLookup(commandByKey)
 
-	local defaultChannelId = normalizeKey(commandRoutingConfig.defaultChannel) or 'global'
+	local defaultChannelId = normalizeKey(routingConfig.defaultChannel) or 'global'
 	if not channelById[defaultChannelId] then
 		if channelById.global then
 			defaultChannelId = 'global'
@@ -583,7 +666,7 @@ local function setupBootstrap()
 		singleChannelId = defaultChannelId
 	end
 
-	local whisperTabEnabled = whispersConfig.separateWhisperTab ~= false
+	local whisperTabEnabled = whispersConfig.tabEnabled ~= false
 	local whisperFallbackChannelId = normalizeKey(whispersConfig.fallbackChannel) or defaultChannelId
 	if whisperFallbackChannelId == 'whispers' or not channelById[whisperFallbackChannelId] then
 		whisperFallbackChannelId = defaultChannelId
@@ -617,7 +700,7 @@ local function setupBootstrap()
 		end
 	end
 
-	local commandRoutingOverrides = buildRoutingOverrides(commandRoutingConfig.overrides, channelById)
+	local commandRoutingOverrides = buildRoutingOverrides(routingConfig.overrides, channelById)
 	if not whisperTabEnabled then
 		local whisperRoutingKeys = {'whisper', 'dm', 'msg', 'reply', 'r'}
 		for i = 1, #whisperRoutingKeys do
@@ -631,13 +714,16 @@ local function setupBootstrap()
 			commandByKey.reply.channel = whisperFallbackChannelId
 		end
 	end
-	local commandResponseWindowMs = math.max(100, tonumber(commandRoutingConfig.responseWindowMs) or 1500)
+	local commandResponseWindowMs = math.max(100, tonumber(routingConfig.responseWindowMs) or 1500)
 
-	local whisperNotifications = type(whispersConfig.notifications) == 'table' and whispersConfig.notifications or {}
+	local whisperNotification = type(whispersConfig.notification) == 'table' and whispersConfig.notification or {}
+	local whisperSoundConfig = type(whisperNotification.sound) == 'table' and whisperNotification.sound or {}
+	local whisperFallbackSoundConfig = type(whisperNotification.fallbackSound) == 'table' and whisperNotification.fallbackSound or {}
 	local whisperSidebar = type(whispersConfig.sidebar) == 'table' and whispersConfig.sidebar or {}
 
 	Client.config = {
-		chat = chatConfig,
+		settings = settingsConfig,
+		messages = messagesConfig,
 		ui = uiConfig,
 		emoji = emojiConfig,
 		typing = typingConfig,
@@ -645,9 +731,10 @@ local function setupBootstrap()
 		distance = distanceConfig,
 		distanceUi = distanceUiConfig,
 		runtime = clientRuntime,
+		access = accessConfig,
 		channels = channelsConfig,
 		commands = commandsConfig,
-		commandRouting = commandRoutingConfig,
+		commandRouting = routingConfig,
 		whispers = whispersConfig
 	}
 
@@ -666,10 +753,12 @@ local function setupBootstrap()
 		separateChannelTabs = separateChannelTabs,
 		singleChannelId = singleChannelId,
 		autoScrollDefault = uiConfig.autoScrollDefault ~= false,
-		whisperNotificationDefaultEnabled = whisperNotifications.enabled ~= false,
-		whisperNotificationVolume = clamp(tonumber(whisperNotifications.volume) or 0.65, 0.0, 1.0),
-		whisperNotificationSoundName = tostring(whisperNotifications.soundName or 'SELECT'),
-		whisperNotificationSoundSet = tostring(whisperNotifications.soundSet or 'HUD_FRONTEND_DEFAULT_SOUNDSET'),
+		whisperNotificationDefaultEnabled = whisperNotification.enabled ~= false,
+		whisperNotificationVolume = clamp(tonumber(whisperNotification.volume) or 0.65, 0.0, 1.0),
+		whisperNotificationSoundName = tostring(whisperSoundConfig.name or 'TENNIS_POINT_WON'),
+		whisperNotificationSoundSet = tostring(whisperSoundConfig.set or 'HUD_AWARDS'),
+		whisperNotificationFallbackSoundName = tostring(whisperFallbackSoundConfig.name or 'SELECT'),
+		whisperNotificationFallbackSoundSet = tostring(whisperFallbackSoundConfig.set or 'HUD_FRONTEND_DEFAULT_SOUNDSET'),
 		whisperSidebarCollapsible = whisperSidebar.collapsible ~= false,
 		whisperSidebarDefaultCollapsed = whisperSidebar.defaultCollapsed == true,
 		chatOpenControl = tonumber(clientRuntime.chatOpenControl) or 245,
@@ -690,9 +779,9 @@ local function setupBootstrap()
 		MutedPlayers = {},
 		EmojiUsage = {},
 		EmojiRecent = {},
-		DisplayMessagesAbovePlayers = uiConfig.displayOverheadByDefault == true,
+		DisplayMessagesAbovePlayers = uiOverheadConfig.enabledByDefault == true,
 		OverheadMessages = {},
-		OverheadUpdateIntervalMs = math.max(1, tonumber(uiConfig.overheadUpdateMs) or 50),
+		OverheadUpdateIntervalMs = math.max(1, tonumber(uiOverheadConfig.updateMs) or 50),
 		EmojiRecentLimit = math.max(1, tonumber(emojiConfig.recentLimit) or 10),
 		EmojiTopLimit = math.max(1, tonumber(emojiConfig.topLimit) or 10),
 		ReplyTo = nil,
@@ -711,7 +800,7 @@ local function setupBootstrap()
 		bubbleToggleAllowed = bubbleConfig.enabled == true and bubbleConfig.allowPlayerToggle == true,
 		bubbleDisplayEnabled = bubbleConfig.enabled == true,
 		whisperSoundToggleAllowed = true,
-		whisperSoundEnabled = whisperNotifications.enabled ~= false,
+		whisperSoundEnabled = whisperNotification.enabled ~= false,
 		autoScrollToggleAllowed = true,
 		autoScrollEnabled = uiConfig.autoScrollDefault ~= false,
 		distanceEnabled = type(distanceConfig) == 'table' and distanceConfig.enabled == true,
@@ -739,14 +828,18 @@ local function setupBootstrap()
 	}
 
 	local state = Client.state
-	state.ActionMessageColor = normalizeRgbColor(chatConfig.actionColor, {200, 0, 255})
-	state.LocalMessageColor = normalizeRgbColor(chatConfig.localColor, {0, 153, 204})
-	state.GlobalMessageColor = normalizeRgbColor(chatConfig.globalColor, {212, 175, 55})
-	state.StaffMessageColor = normalizeRgbColor(chatConfig.staffColor, {255, 64, 0})
-	state.WhisperColor = normalizeRgbColor(chatConfig.whisperColor, {254, 127, 156})
-	state.WhisperEchoColor = normalizeRgbColor(chatConfig.whisperEchoColor, {204, 77, 106})
-	state.ActionMessageDistance = tonumber(chatConfig.actionDistance) or 50.0
-	state.LocalMessageDistance = tonumber(chatConfig.localDistance) or 50.0
+	local localChannel = channelById["local"] or {}
+	local globalChannel = channelById.global or {}
+	local staffChannel = channelById.staff or {}
+	local whisperChannel = channelById.whispers or {}
+	state.ActionMessageColor = normalizeRgbColor(actionMessageConfig.color, {200, 0, 255})
+	state.LocalMessageColor = normalizeRgbColor(localChannel.color, {0, 153, 204})
+	state.GlobalMessageColor = normalizeRgbColor(globalChannel.color, {212, 175, 55})
+	state.StaffMessageColor = normalizeRgbColor(staffChannel.color, {255, 64, 0})
+	state.WhisperColor = normalizeRgbColor(whisperChannel.color, {254, 127, 156})
+	state.WhisperEchoColor = normalizeRgbColor(messagesConfig.whisperOutgoingColor, {204, 77, 106})
+	state.ActionMessageDistance = tonumber(actionMessageConfig.distance) or 50.0
+	state.LocalMessageDistance = tonumber(localChannel.distance) or 50.0
 
 	IsInProximity = isInProximity
 	bootstrapInitialized = true

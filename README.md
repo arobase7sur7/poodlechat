@@ -1,146 +1,159 @@
-# PoodleChat (Updated)
+# poodlechat
 
-PoodleChat is a modernized FiveM chat resource focused on clean UI, strong performance, and maintainable structure.
-This fork keeps behavior compatibility with the current script while cleaning architecture, removing legacy paths, and centralizing configuration.
+Lightweight FiveM chat resource with:
 
-## Modernization Highlights
-
-- Modernized chat UI with a cleaner layout and improved usability.
-- Improved overall performance through reduced redundant work and optimized update loops.
-- New emoji system with categorized browsing, recent/most used usage tracking, and faster incremental rendering.
-- Distance-aware voice UI with built-in PMA Voice support and generic custom integration hooks.
-- Typing indicator system with player-facing toggle support (when allowed).
-- Chat bubble visual system with player-facing toggle support (when allowed).
-- RDR3/RedM support removed and codebase cleaned for GTA V/FiveM only.
-- `discord_rest` integration removed and replaced with optional Discord webhooks.
-- Fully centralized configuration in `shared/config.lua`.
-
-## What Changed vs Older poodlechat
-
-This fork differs from older upstream variants in several key ways:
-
-- UI has been redesigned and modernized.
-- Runtime logic is split into dedicated client/server/UI modules for maintainability.
-- Emoji handling now supports category browsing and optimized panel updates.
-- Distance widget and voice-range visualization support PMA Voice directly and allow custom distance getters/setters.
-- Typing and bubble systems include both server-side config controls and client-side in-game toggles.
-- Legacy RedM/RDR3 and legacy Discord bridge paths were removed.
+- Local / global / staff / whisper channels
+- Whisper conversations and sidebar
+- Distance mode widget with voice range hooks
+- Typing indicators and chat bubbles
+- Emoji panel (recent + top usage)
+- Optional Discord webhook forwarding
 
 ## Requirements
 
-- FiveM server (GTA V) (How you would run the script if not anyway lol)
-- Optional: [pma-voice](https://github.com/AvarianKnight/pma-voice) for automatic voice range integration
+- FiveM server (GTA V)
+- Optional: [pma-voice](https://github.com/AvarianKnight/pma-voice) for distance integration
 
 ## Installation
 
-1. Place the resource in your `resources` folder.
-2. Ensure it in `server.cfg`:
+1. Put `poodlechat` in your `resources` directory.
+2. Add to `server.cfg`:
 
 ```cfg
 ensure poodlechat
 ```
 
-3. Delete or comment this line in `server.cfg`: (if not, you will have 2 chat in game) 
+3. Disable default chat if needed:
 
 ```cfg
 # ensure chat
 ```
 
 4. Configure `shared/config.lua`.
-5. If using staff/role permissions, configure ACE rules in `server.cfg`.
 
-## Configuration
+## Config Schema
 
-All configuration is in:
+`shared/config.lua` is new-schema-only.
 
-- `shared/config.lua`
+Top-level keys:
 
-Main sections:
-
-- `Config.Chat`
-- `Config.Access`
-- `Config.UI`
-- `Config.Emoji`
-- `Config.Distance`
-- `Config.Discord`
-- `Config.TypingIndicator`
-- `Config.ChatBubbles`
-- `Config.Runtime`
-
-### Typing and Bubble Toggles
-
-- Global enable/disable:
-  - `Config.TypingIndicator.enabled`
-  - `Config.ChatBubbles.enabled`
-- Player in-game toggle permission:
-  - `Config.TypingIndicator.allowPlayerToggle`
-  - `Config.ChatBubbles.allowPlayerToggle`
-
-When toggles are allowed, players can use:
-
-- `/toggletyping`
-- `/togglebubbles`
-
-### Distance / Voice Integration
-
-Distance support is controlled by `Config.Distance`:
-
-- `getDistance`
-- `getLabel`
-- `setDistance`
-- `ranges`
+- `settings`
+- `channels`
+- `messages`
+- `commands`
+- `routing`
+- `whispers`
+- `access`
 - `ui`
+- `emoji`
+- `distance`
+- `features`
+- `discord`
+- `runtime`
 
-Default PMA Voice integration is included. You can replace these hooks with your own voice system logic.
+### Channels
 
-### Discord Webhooks
+Each channel entry supports:
 
-Discord integration is optional and webhook-based through `Config.Discord`.
+- `label`
+- `color`
+- `history`
+- `visible`
+- `cycle`
+- `scope`
+- `distance` (for proximity channels)
+- `permission` (for restricted channels)
 
-- `enabled` controls the whole integration.
-- `webhook` is the full webhook URL.
-- `sendLocal`, `sendGlobal`, `sendStaff`, `sendAction`, `sendJoinLeave`, `sendReports` control per-channel forwarding.
+### Distance
 
-### Staff Channel / Staff Tab Setup
+Distance UI and cycling are driven by:
 
-Recommended `server.cfg` example (most reliable):
+- `distance.enabled`
+- `distance.default`
+- `distance.pollRate`
+- `distance.getCurrent`
+- `distance.getLabel`
+- `distance.setCurrent`
+- `distance.modes` (`id`, `label`, `distance`, `color`)
+- `distance.ui` (`useModeLabels`, `dynamic`)
 
-```cfg
-add_ace group.admin chat.staffChannel allow
-add_principal identifier.license:YOUR_LICENSE_HEX group.admin
-```
+### Typing / Bubbles
 
-Direct player ace (without group) also works:
+- `features.typing`
+- `features.bubbles`
 
-```cfg
-add_ace identifier.license:YOUR_LICENSE_HEX chat.staffChannel allow
-```
+Typing includes:
 
-Tip: after any ACE/principal change, restart the resource so clients refresh channel visibility.
+- `headTracking`
+- `offset`
+- `screenLift`
 
+### Whispers
 
-## Commands
+- `whispers.tabEnabled`
+- `whispers.fallbackChannel`
+- `whispers.maxConversations`
+- `whispers.maxMessagesPerConversation`
+- `whispers.defaultConversationMode`
+- `whispers.notification`
+- `whispers.sidebar`
 
+Whisper notification sound supports:
+
+- `whispers.notification.sound`
+- `whispers.notification.fallbackSound`
+
+Default profile:
+
+- Primary: `TENNIS_POINT_WON` / `HUD_AWARDS`
+- Fallback: `SELECT` / `HUD_FRONTEND_DEFAULT_SOUNDSET`
+
+### Access / Role Prefix
+
+- `access.rolePrefixEnabled` defaults to `false`
+- Staff/admin role label prefix is hidden unless this is explicitly enabled
+
+## Commands (Default)
+
+- `/global`, `/g`
+- `/say`
+- `/me`
+- `/staff`
+- `/dm`, `/whisper`, `/w`, `/msg`
+- `/reply`, `/r`
 - `/clear`
-- `/global [message]`
-- `/g [message]`
-- `/say [message]`
-- `/me [action]`
-- `/staff [message]`
-- `/whisper [player] [message]`
-- `/w [player] [message]`
-- `/reply [message]`
-- `/r [message]`
-- `/mute [player]`
-- `/unmute [player]`
-- `/muted`
-- `/report [player] [reason]`
-- `/nick [nickname]`
 - `/togglechat`
 - `/toggleoverhead`
-- `/toggletyping` (if allowed)
-- `/togglebubbles` (if allowed)
+- `/toggletyping`
+- `/togglebubbles`
+- `/report`
+- `/mute`
+- `/unmute`
+- `/muted`
+- `/nick`
 
 ## Notes
 
-- This resource is GTA V only now (`games { "gta5" }`), it will probably not work on RDR3 and will never be updated for.
+- OOC is not part of the default command set.
+- Admin/staff prefix display is disabled by default.
+- Distance mode count is derived safely from configured modes and player proximity state.
+
+## Dev Notes (Exports)
+
+Server exports:
+
+- `exports['poodlechat']:SendChannelMessage(target, payload)`
+- `exports['poodlechat']:SendBubbleMessage(sourceId, text)`
+
+Client exports:
+
+- `exports['poodlechat']:AddChannelMessage(payload)`
+- `exports['poodlechat']:SetChannel(channelId)`
+
+Behavior notes:
+
+- `payload.channel` is optional. Unknown channel ids automatically fall back.
+- If `target` cannot access the requested channel/tab, the message is sent to that target on the first allowed channel, then default channel as final fallback.
+- If whisper tab is disabled, whisper-targeted messages are rerouted to whisper fallback/default channel.
+- `AddChannelMessage` returns `(true, resolvedChannelId)`.
+- `SetChannel` returns `(true, resolvedChannelId)` and always resolves to a valid accessible channel.

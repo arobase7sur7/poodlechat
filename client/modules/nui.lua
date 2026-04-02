@@ -20,6 +20,38 @@ local function forwardMessageToNui(raw)
 	})
 end
 
+local function registerNuiCallbackSafe(name, fallbackResponse, handler)
+	RegisterNUICallback(name, function(data, cb)
+		local responded = false
+
+		local function safeRespond(payload)
+			if responded then
+				return
+			end
+			responded = true
+			pcall(cb, payload)
+		end
+
+		local ok, result = pcall(handler, data, safeRespond)
+		if not ok then
+			print(('[poodlechat] NUI callback failed (%s): %s'):format(name, tostring(result)))
+			safeRespond(fallbackResponse)
+			return
+		end
+
+		if responded then
+			return
+		end
+
+		if result == nil then
+			safeRespond(fallbackResponse)
+			return
+		end
+
+		safeRespond(result)
+	end)
+end
+
 local function registerNuiHandlers()
 	if handlersRegistered then
 		return
@@ -104,109 +136,119 @@ local function registerNuiHandlers()
 		})
 	end)
 
-	RegisterNUICallback('chatResult', function(data, cb)
+	registerNuiCallbackSafe('chatResult', 'ok', function(data)
+		local payload = type(data) == 'table' and data or {}
 		state.chatInputActive = false
 		SetNuiFocus(false, false)
 		Client.setLocalTypingState(false, true)
 
-		if not data.canceled then
+		if not payload.canceled then
 			local playerId = PlayerId()
 			local r, g, b = 0, 0x99, 255
+			local message = tostring(payload.message or '')
+			if message == '' then
+				return 'ok'
+			end
 
-			if data.message:sub(1, 1) == '/' then
-				local rawCommand = data.message:sub(2)
+			if message:sub(1, 1) == '/' then
+				local rawCommand = message:sub(2)
 				local commandName = rawCommand:match('^(%S+)')
 				if commandName then
 					Client.setCommandContext(commandName)
 				end
 				ExecuteCommand(rawCommand)
 			else
-				TriggerServerEvent('_chat:messageEntered', GetPlayerName(playerId), {r, g, b}, data.message, state.Channel)
+				TriggerServerEvent('_chat:messageEntered', GetPlayerName(playerId), {r, g, b}, message, state.Channel)
 			end
 		end
 
-		cb('ok')
+		return 'ok'
 	end)
 
-	RegisterNUICallback('typingState', function(data, cb)
+	registerNuiCallbackSafe('typingState', {}, function(data)
 		Client.setLocalTypingState(type(data) == 'table' and data.active == true, false)
-		cb({})
+		return {}
 	end)
 
-	RegisterNUICallback('cycleDistance', function(_, cb)
+	registerNuiCallbackSafe('cycleDistance', {ok = false, state = state.distanceState}, function()
 		local ok = Client.cycleDistance()
-		cb({ok = ok, state = state.distanceState})
+		return {ok = ok, state = state.distanceState}
 	end)
 
-	RegisterNUICallback('toggleTypingDisplay', function(_, cb)
+	registerNuiCallbackSafe('toggleTypingDisplay', {active = state.typingDisplayEnabled}, function()
 		local current = Client.toggleTypingDisplay()
-		cb({active = current})
+		return {active = current}
 	end)
 
-	RegisterNUICallback('toggleBubbleDisplay', function(_, cb)
+	registerNuiCallbackSafe('toggleBubbleDisplay', {active = state.bubbleDisplayEnabled}, function()
 		local current = Client.toggleBubbleDisplay()
-		cb({active = current})
+		return {active = current}
 	end)
 
-	RegisterNUICallback('toggleWhisperSound', function(_, cb)
+	registerNuiCallbackSafe('toggleWhisperSound', {
+		active = state.whisperSoundEnabled,
+		volume = tonumber(constants.whisperNotificationVolume) or 0.65
+	}, function()
 		local current = Client.toggleWhisperSound()
-		cb({
+		return {
 			active = current,
 			volume = tonumber(constants.whisperNotificationVolume) or 0.65
-		})
+		}
 	end)
 
-	RegisterNUICallback('toggleAutoScroll', function(_, cb)
+	registerNuiCallbackSafe('toggleAutoScroll', {active = state.autoScrollEnabled}, function()
 		local current = Client.toggleAutoScroll()
-		cb({active = current})
+		return {active = current}
 	end)
 
-	RegisterNUICallback('playWhisperSound', function(_, cb)
+	registerNuiCallbackSafe('playWhisperSound', {}, function()
 		Client.playWhisperSound()
-		cb({})
+		return {}
 	end)
 
-	RegisterNUICallback('setChannel', function(data, cb)
+	registerNuiCallbackSafe('setChannel', {}, function(data)
 		local requested = type(data) == 'table' and data.channelId or nil
 		if requested then
 			Client.SetChannel(requested)
 		end
-		cb({})
+		return {}
 	end)
 
-	RegisterNUICallback('cycleChannel', function(_, cb)
+	registerNuiCallbackSafe('cycleChannel', {}, function()
 		Client.CycleChannel()
-		cb({})
+		return {}
 	end)
 
-	RegisterNUICallback('loaded', function(_, cb)
+	registerNuiCallbackSafe('loaded', 'ok', function()
 		TriggerServerEvent('chat:init')
 		TriggerServerEvent('poodlechat:getPermissions')
 		Client.refreshCommands()
 		Client.refreshThemes()
 		state.chatLoaded = true
 		Client.sendFeatureState()
-		Client.refreshDistanceState(true)
 		Client.refreshDistanceModeCount()
-		cb('ok')
+		return 'ok'
 	end)
 
-	RegisterNUICallback('onLoad', function(_, cb)
-		cb(Client.buildOnLoadPayload())
+	registerNuiCallbackSafe('onLoad', {}, function()
+		return Client.buildOnLoadPayload() or {}
 	end)
 
-	RegisterNUICallback('getEmojiPanelData', function(_, cb)
-		cb(Client.getEmojiPanelData())
+	registerNuiCallbackSafe('getEmojiPanelData', {recent = {}, top = {}}, function()
+		return Client.getEmojiPanelData() or {recent = {}, top = {}}
 	end)
 
-	RegisterNUICallback('getWhisperTargets', function(_, cb)
+	registerNuiCallbackSafe('getWhisperTargets', {}, function()
 		TriggerServerEvent('poodlechat:getWhisperTargets')
-		cb({})
+		return {}
 	end)
 
-	RegisterNUICallback('useEmoji', function(data, cb)
+	registerNuiCallbackSafe('useEmoji', {panel = {recent = {}, top = {}}}, function(data)
 		local payload = Client.handleEmojiUse(type(data) == 'table' and data.emoji or nil)
-		cb(payload)
+		if type(payload) ~= 'table' then
+			return {panel = {recent = {}, top = {}}}
+		end
+		return payload
 	end)
 
 	AddEventHandler('onClientResourceStart', function(resName)
@@ -232,7 +274,6 @@ local function registerNuiHandlers()
 
 		Wait(constants.pmaStartDelayMs)
 		Client.refreshDistanceModeCount()
-		Client.refreshDistanceState(true)
 	end)
 
 	AddEventHandler('onClientResourceStop', function(resName)

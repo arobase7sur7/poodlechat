@@ -25,6 +25,35 @@ local function getChannel(channelId)
 	return constants.channelById[id] or constants.channelById[constants.defaultChannelId]
 end
 
+local function getFirstAccessibleChannelId()
+	for i = 1, #constants.channelList do
+		local channel = constants.channelList[i]
+		if channel and channel.id and Client.canAccessChannel(channel.id) then
+			return channel.id
+		end
+	end
+
+	return constants.defaultChannelId
+end
+
+local function resolveChannelWithFallback(channelId)
+	local normalized = Client.normalizeKey(channelId)
+
+	if constants.separateChannelTabs ~= true then
+		normalized = constants.singleChannelId or constants.defaultChannelId
+	end
+
+	if not normalized or not constants.channelById[normalized] or not Client.canAccessChannel(normalized) then
+		normalized = constants.defaultChannelId
+	end
+
+	if not normalized or not constants.channelById[normalized] or not Client.canAccessChannel(normalized) then
+		normalized = getFirstAccessibleChannelId()
+	end
+
+	return normalized
+end
+
 local function normalizeLimit(value, fallback)
 	local number = tonumber(value)
 	if number == nil then
@@ -54,9 +83,7 @@ local function normalizeMessagePayload(message)
 		channelId = Client.getActiveCommandContextChannel() or constants.defaultChannelId
 	end
 
-	if not constants.channelById[channelId] then
-		channelId = constants.defaultChannelId
-	end
+	channelId = resolveChannelWithFallback(channelId)
 
 	local channel = getChannel(channelId)
 	local color = Client.normalizeRgbColor(raw.color, channel and channel.color or {255, 255, 255})
@@ -94,17 +121,7 @@ local function setChannel(channelId)
 	end
 
 	local normalized = Client.normalizeKey(channelId)
-	if not normalized or not constants.channelById[normalized] then
-		return
-	end
-
-	if constants.separateChannelTabs ~= true then
-		normalized = constants.singleChannelId or constants.defaultChannelId
-	end
-
-	if not Client.canAccessChannel(normalized) then
-		normalized = constants.defaultChannelId
-	end
+	normalized = resolveChannelWithFallback(normalized)
 
 	State.Channel = normalized
 
@@ -424,10 +441,10 @@ local function buildOnLoadPayload()
 			defaultTemplateId = tostring(config.ui.defaultTemplateId or 'default'),
 			defaultAltTemplateId = tostring(config.ui.defaultAltTemplateId or 'defaultAlt'),
 			runtime = {
-				emojiRenderBatchSize = tonumber(((Config.Runtime or {}).ui or {}).emojiRenderBatchSize) or 260,
-				emojiSearchDebounceMs = tonumber(((Config.Runtime or {}).ui or {}).emojiSearchDebounceMs) or 80,
-				inputFocusDelayMs = tonumber(((Config.Runtime or {}).ui or {}).inputFocusDelayMs) or 100,
-				pageScrollStep = tonumber(((Config.Runtime or {}).ui or {}).pageScrollStep) or 100
+				emojiRenderBatchSize = tonumber(((config.runtime or {}).ui or {}).emojiRenderBatchSize) or 260,
+				emojiSearchDebounceMs = tonumber(((config.runtime or {}).ui or {}).emojiSearchDebounceMs) or 80,
+				inputFocusDelayMs = tonumber(((config.runtime or {}).ui or {}).inputFocusDelayMs) or 100,
+				pageScrollStep = tonumber(((config.runtime or {}).ui or {}).pageScrollStep) or 100
 			}
 		}
 	}
@@ -801,7 +818,7 @@ local function registerChatHandlers()
 
 		Client.sendNuiMessage({
 			type = 'setPermissions',
-			permissions = json.encode(permissions),
+			permissions = permissions,
 			channels = getAllowedChannelsPayload(),
 			activeChannel = State.Channel
 		})
@@ -867,8 +884,15 @@ local function registerChatHandlers()
 	end)
 
 	exports('AddChannelMessage', function(payload)
-		sendChannelMessage(payload or {})
-		return true
+		local normalized = normalizeMessagePayload(payload or {})
+		TriggerEvent('chat:addMessage', normalized)
+		return true, normalized.channel
+	end)
+
+	exports('SetChannel', function(channelId)
+		local resolved = resolveChannelWithFallback(channelId)
+		setChannel(resolved)
+		return true, resolved
 	end)
 
 	handlersRegistered = true

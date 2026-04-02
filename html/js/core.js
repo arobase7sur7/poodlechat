@@ -13,7 +13,23 @@ function fetchJson(route, payload) {
 			'Content-Type': 'application/json'
 		},
 		body: JSON.stringify(payload || {})
-	}).then((resp) => resp.json());
+	}).then((resp) => {
+		if (!resp) {
+			return {};
+		}
+
+		return resp.text().then((raw) => {
+			if (!raw || raw === '') {
+				return {};
+			}
+
+			try {
+				return JSON.parse(raw);
+			} catch (error) {
+				return {};
+			}
+		});
+	});
 }
 
 function ensureArray(value) {

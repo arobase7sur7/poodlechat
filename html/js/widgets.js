@@ -1,5 +1,9 @@
 function normalizeDistanceState(state) {
 	const payload = state || {};
+	const ranges = ensureArray(payload.ranges)
+		.map((entry) => Number(entry))
+		.filter((entry) => Number.isFinite(entry) && entry > 0)
+		.sort((a, b) => a - b);
 	return {
 		enabled: payload.enabled === true,
 		label: ensureString(payload.label, ''),
@@ -7,8 +11,27 @@ function normalizeDistanceState(state) {
 		percent: Number.isFinite(Number(payload.percent)) ? Number(payload.percent) : 0,
 		value: Number.isFinite(Number(payload.value)) ? Number(payload.value) : 0,
 		modeIndex: Number.isFinite(Number(payload.modeIndex)) ? Number(payload.modeIndex) : 0,
-		modeCount: Number.isFinite(Number(payload.modeCount)) ? Number(payload.modeCount) : 0
+		modeCount: Number.isFinite(Number(payload.modeCount)) ? Number(payload.modeCount) : 0,
+		ranges
 	};
+}
+
+function percentFromDistance(payload) {
+	const ranges = payload.ranges || [];
+	if (ranges.length === 0 || !Number.isFinite(payload.value)) {
+		return null;
+	}
+	if (ranges.length === 1) {
+		return 100;
+	}
+
+	const minRange = ranges[0];
+	const maxRange = ranges[ranges.length - 1];
+	if (!Number.isFinite(minRange) || !Number.isFinite(maxRange) || maxRange <= minRange) {
+		return null;
+	}
+
+	return ((payload.value - minRange) / (maxRange - minRange)) * 100;
 }
 
 function updateDistanceWidget(state) {
@@ -29,8 +52,23 @@ function updateDistanceWidget(state) {
 	widget.style.display = 'inline-flex';
 	label.textContent = payload.label || `${payload.value.toFixed(1)} m`;
 	label.style.color = payload.color;
-	const safePercent = Math.max(0, Math.min(100, payload.percent));
+	let percent = Number(payload.percent);
+	if (!Number.isFinite(percent)) {
+		const fallbackPercent = percentFromDistance(payload);
+		percent = Number.isFinite(fallbackPercent) ? fallbackPercent : 0;
+	} else {
+		const fallbackPercent = percentFromDistance(payload);
+		if (Number.isFinite(fallbackPercent)) {
+			percent = Math.max(percent, fallbackPercent);
+		}
+	}
+
+	let safePercent = Math.max(0, Math.min(100, percent));
+	if (safePercent >= 99) {
+		safePercent = 100;
+	}
 	fill.setAttribute('width', `${safePercent}`);
+	fill.style.width = `${safePercent}%`;
 	fill.style.fill = payload.color;
 	widget.dataset.modeIndex = String(payload.modeIndex || 0);
 	widget.dataset.modeCount = String(payload.modeCount || 0);

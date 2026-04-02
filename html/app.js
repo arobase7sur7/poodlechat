@@ -96,7 +96,11 @@ window.APP = {
 				return;
 			}
 			if (typeof this[item.type] === 'function') {
-				this[item.type](item);
+				try {
+					this[item.type](item);
+				} catch (error) {
+					console.error('poodlechat ui handler failed', item.type, error);
+				}
 			}
 		};
 		window.addEventListener('message', this.listener);
@@ -553,7 +557,13 @@ window.APP = {
 				conversationId = existingConversationId;
 			}
 
-			const defaultPeerName = metadata.peerName || (metadata.peerId ? `Player ${metadata.peerId}` : 'Unknown');
+			message.metadata = {
+				...metadata,
+				conversationId
+			};
+			const normalizedMetadata = message.metadata;
+
+			const defaultPeerName = normalizedMetadata.peerName || (normalizedMetadata.peerId ? `Player ${normalizedMetadata.peerId}` : 'Unknown');
 			const conversation = this.whisperConversations[conversationId] || {
 				id: conversationId,
 				peerName: defaultPeerName,
@@ -563,7 +573,7 @@ window.APP = {
 				unread: 0
 			};
 
-			conversation.peerName = metadata.peerName || conversation.peerName || defaultPeerName;
+			conversation.peerName = normalizedMetadata.peerName || conversation.peerName || defaultPeerName;
 			conversation.peerId = peerId || conversation.peerId;
 			conversation.messages.push(message);
 			if (this.whisperLimits.maxMessagesPerConversation !== -1 && conversation.messages.length > this.whisperLimits.maxMessagesPerConversation) {
@@ -571,7 +581,7 @@ window.APP = {
 			}
 			conversation.lastAt = Date.now();
 
-			const direction = ensureString(metadata.direction, '');
+			const direction = ensureString(normalizedMetadata.direction, '');
 			const incoming = direction === 'in';
 			if (this.isWhispersActive && this.activeWhisperConversationId === conversationId) {
 				conversation.unread = 0;
@@ -1094,10 +1104,25 @@ window.APP = {
 };
 
 window.addEventListener('load', () => {
+	if (window.__POODLECHAT_UI_LOADED) {
+		return;
+	}
+	window.__POODLECHAT_UI_LOADED = true;
+
 	setupEmojiUiBindings();
 
 	fetch('https://' + resourceName() + '/onLoad')
-		.then((resp) => resp.json())
+		.then((resp) => (resp ? resp.text() : ''))
+		.then((raw) => {
+			if (!raw || raw === '') {
+				return {};
+			}
+			try {
+				return JSON.parse(raw);
+			} catch (error) {
+				return {};
+			}
+		})
 		.then((payload) => {
 			if (window.APP_INSTANCE && typeof window.APP_INSTANCE.applyInitialPayload === 'function') {
 				window.APP_INSTANCE.applyInitialPayload(payload || {});
@@ -1106,7 +1131,11 @@ window.addEventListener('load', () => {
 			}
 		})
 		.catch(() => {
-			bootstrapEmojiDataset({});
+			if (window.APP_INSTANCE && typeof window.APP_INSTANCE.applyInitialPayload === 'function') {
+				window.APP_INSTANCE.applyInitialPayload({});
+			} else {
+				bootstrapEmojiDataset({});
+			}
 		});
 
 	document.querySelectorAll('.tab, .tool-btn').forEach((node) => {

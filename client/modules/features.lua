@@ -357,6 +357,75 @@ local function observeDistance(value)
 	end
 end
 
+local function normalizeModeText(value)
+	if type(value) ~= 'string' then
+		return nil
+	end
+
+	local normalized = value:lower():gsub('^%s+', ''):gsub('%s+$', '')
+	if normalized == '' then
+		return nil
+	end
+
+	return normalized
+end
+
+local function resolveModeIndexFromText(value)
+	local target = normalizeModeText(value)
+	if not target then
+		return nil
+	end
+
+	local levels = type(distanceUiConfig.levels) == 'table' and distanceUiConfig.levels or nil
+	if not levels or #levels == 0 then
+		return nil
+	end
+
+	for i = 1, #levels do
+		local level = levels[i]
+		local priority = tonumber(level.priority) or i
+		local idValue = normalizeModeText(level.id)
+		local labelValue = normalizeModeText(tostring(level.label or ''))
+		if target == idValue or target == labelValue then
+			return math.max(1, math.floor(priority + 0.5))
+		end
+	end
+
+	return nil
+end
+
+local function normalizeModeIndex(rawIndex, modeCount)
+	local value = tonumber(rawIndex)
+	if not value then
+		return nil
+	end
+
+	local index = math.floor(value + 0.5)
+	if index < 0 then
+		return nil
+	end
+
+	local total = tonumber(modeCount)
+	if not total or total <= 0 then
+		if index == 0 then
+			return 1
+		end
+		return index
+	end
+
+	total = math.max(1, math.floor(total + 0.5))
+
+	if index == 0 then
+		return 1
+	end
+
+	if index > total and (index - 1) >= 1 and (index - 1) <= total then
+		return index - 1
+	end
+
+	return Client.clamp(index, 1, total)
+end
+
 local function createDistancePayload()
 	if not State.distanceEnabled then
 		return {
@@ -391,9 +460,8 @@ local function createDistancePayload()
 	local label, color = getDistanceOverride(distance, fallbackLabel, proximityIndex)
 	local ranges = getDistanceRangesList()
 
-	local percent = 0
+	local percent = nil
 	local modeCount = tonumber(State.distanceModeCount)
-	local modeIndex = proximityIndex and tonumber(proximityIndex) or nil
 
 	if not modeCount or modeCount <= 1 then
 		if type(distanceUiConfig.levels) == 'table' and #distanceUiConfig.levels > 1 then
@@ -403,17 +471,50 @@ local function createDistancePayload()
 		end
 	end
 
-	if modeIndex and modeCount and modeCount > 1 then
-		percent = math.floor(Client.clamp((modeIndex - 1) / (modeCount - 1), 0.0, 1.0) * 100 + 0.5)
-	elseif #ranges == 1 then
-		percent = 100
-	else
+	local modeIndex = normalizeModeIndex(proximityIndex, modeCount)
+	local inferredModeIndex = resolveModeIndexFromText(proximityMode) or resolveModeIndexFromText(rawLabel) or resolveModeIndexFromText(label)
+	if inferredModeIndex then
+		if modeCount and modeCount > 0 then
+			modeIndex = Client.clamp(inferredModeIndex, 1, modeCount)
+		else
+			modeIndex = inferredModeIndex
+		end
+	end
+	local modePercent = nil
+
+	if #ranges > 1 then
 		local minRange = ranges[1]
 		local maxRange = ranges[#ranges]
 
 		if maxRange > minRange then
 			percent = math.floor(Client.clamp((distance - minRange) / (maxRange - minRange), 0.0, 1.0) * 100 + 0.5)
 		end
+	end
+
+	if modeIndex and modeCount and modeCount > 1 then
+		modePercent = math.floor(Client.clamp((modeIndex - 1) / (modeCount - 1), 0.0, 1.0) * 100 + 0.5)
+	elseif modeIndex and modeCount and modeCount == 1 then
+		modePercent = 100
+	end
+
+	if modePercent ~= nil then
+		if percent == nil then
+			percent = modePercent
+		else
+			percent = math.max(percent, modePercent)
+		end
+	end
+
+	if percent == nil then
+		if #ranges == 1 then
+			percent = 100
+		else
+			percent = 0
+		end
+	end
+
+	if percent >= 99 then
+		percent = 100
 	end
 
 	return {
@@ -492,24 +593,20 @@ local function refreshDistanceModeCount()
 		return
 	end
 
-	if GetResourceState('pma-voice') ~= 'started' then
-		return
+	local configuredLevels = type(distanceUiConfig.levels) == 'table' and #distanceUiConfig.levels or 0
+	if configuredLevels > 0 then
+		State.distanceModeCount = configuredLevels
+	else
+		State.distanceModeCount = math.max(1, #getDistanceRangesList())
 	end
 
-	pcall(function()
-		TriggerEvent('pma-voice:settingsCallback', function(voiceSettings)
-			local modes = type(voiceSettings) == 'table' and voiceSettings.voiceModes or nil
-			if type(modes) ~= 'table' then
-				return
-			end
+	local proximityState = getLocalProximityState()
+	local proximityIndex = proximityState and tonumber(proximityState.index) or nil
+	if proximityIndex and proximityIndex > State.distanceModeCount and configuredLevels <= 0 then
+		State.distanceModeCount = math.floor(proximityIndex + 0.5)
+	end
 
-			local count = #modes
-			if count > 0 then
-				State.distanceModeCount = count
-				refreshDistanceState(true)
-			end
-		end)
-	end)
+	refreshDistanceState(true)
 end
 
 local function invokeDistanceCycleFallback()
@@ -606,7 +703,7 @@ local function getPlayerPedFromServerId(serverId)
 	return ped
 end
 
-local function getPedScreenCoord(serverId, offset, maxDistance, myCoords)
+local function getPedScreenCoord(serverId, offset, maxDistance, myCoords, style)
 	local ped = getPlayerPedFromServerId(serverId)
 
 	if not ped then
@@ -622,6 +719,18 @@ local function getPedScreenCoord(serverId, offset, maxDistance, myCoords)
 
 	if #(sourceCoords - pedCoords) > maxDistance then
 		return false, 0.0, 0.0
+	end
+
+	if style == 'typingBubble' and typingConfig.headTracking == true and type(GetPedBoneCoords) == 'function' then
+		local headCoords = GetPedBoneCoords(ped, 31086, 0.0, 0.0, 0.0)
+		if headCoords then
+			local headOffset = offset or vector3(0.0, 0.0, 0.0)
+			return GetScreenCoordFromWorldCoord(
+				headCoords.x + headOffset.x,
+				headCoords.y + headOffset.y,
+				headCoords.z + headOffset.z
+			)
+		end
 	end
 
 	local finalOffset = offset
@@ -721,8 +830,24 @@ local function setTypingOverhead(serverId, active)
 
 	local style = tostring(typingConfig.style or 'dots')
 	local text = style == 'dots' and '...' or 'typing'
-	local configuredOffset = Client.getOffset(typingConfig.offset, vector3(0.0, 0.0, 1.1))
-	local offset = vector3(configuredOffset.x, configuredOffset.y, math.max(0.75, configuredOffset.z - 0.2))
+	local configuredOffset = Client.getOffset(typingConfig.offset, vector3(0.0, 0.0, 1.35))
+	local offset = nil
+	if typingConfig.headTracking == true then
+		local configuredHeadLift = tonumber(typingConfig.headLift)
+		local fallbackHeadLift = tonumber(configuredOffset.z) or 1.35
+		if not configuredHeadLift then
+			if fallbackHeadLift > 0.8 then
+				configuredHeadLift = 0.26
+			else
+				configuredHeadLift = math.max(0.05, fallbackHeadLift)
+			end
+		end
+
+		local totalHeadLift = math.max(0.05, configuredHeadLift + (tonumber(typingConfig.screenLift) or 0.0))
+		offset = vector3(configuredOffset.x, configuredOffset.y, totalHeadLift)
+	else
+		offset = vector3(configuredOffset.x, configuredOffset.y, math.max(1.05, configuredOffset.z))
+	end
 	local maxDistance = tonumber(typingConfig.maxDistance) or State.LocalMessageDistance
 	local existing = State.OverheadMessages[entryId]
 
@@ -962,9 +1087,20 @@ local function playWhisperSound()
 		return false
 	end
 
-	local soundName = tostring(constants.whisperNotificationSoundName or 'SELECT')
-	local soundSet = tostring(constants.whisperNotificationSoundSet or 'HUD_FRONTEND_DEFAULT_SOUNDSET')
-	PlaySoundFrontend(-1, soundName, soundSet, true)
+	local soundName = tostring(constants.whisperNotificationSoundName or 'TENNIS_POINT_WON')
+	local soundSet = tostring(constants.whisperNotificationSoundSet or 'HUD_AWARDS')
+	local fallbackName = tostring(constants.whisperNotificationFallbackSoundName or 'SELECT')
+	local fallbackSet = tostring(constants.whisperNotificationFallbackSoundSet or 'HUD_FRONTEND_DEFAULT_SOUNDSET')
+
+	if soundName == '' or soundSet == '' then
+		pcall(PlaySoundFrontend, -1, fallbackName, fallbackSet, true)
+		return true
+	end
+
+	local ok = pcall(PlaySoundFrontend, -1, soundName, soundSet, true)
+	if not ok then
+		pcall(PlaySoundFrontend, -1, fallbackName, fallbackSet, true)
+	end
 	return true
 end
 
@@ -1028,7 +1164,7 @@ local function registerFeatureHandlers()
 					if entry.expiresAt and now >= entry.expiresAt then
 						removeOverheadMessage(id)
 					else
-						local onScreen, screenX, screenY = getPedScreenCoord(entry.serverId, entry.offset, entry.maxDistance, myCoords)
+						local onScreen, screenX, screenY = getPedScreenCoord(entry.serverId, entry.offset, entry.maxDistance, myCoords, entry.style)
 
 						if onScreen == nil then
 							removeOverheadMessage(id)

@@ -18,7 +18,6 @@ local logColors = {
 local legacyCommandAliases = {
 	global = {'global', 'g'},
 	say = {'say'},
-	ooc = {'ooc', 'b'},
 	me = {'me'},
 	staff = {'staff'},
 	whisper = {'whisper', 'w', 'msg', 'dm'},
@@ -190,43 +189,51 @@ local function normalizeHistoryLimit(value, fallback)
 	return number
 end
 
-local function buildChannelDefinitions(channelsConfig, chatConfig, accessConfig)
+local function buildChannelDefinitions(channelsConfig, defaultStaffAce)
 	local defaults = {
 		["local"] = {
 			label = 'Local',
-			color = chatConfig.localColor or {0, 153, 204},
+			color = {0, 153, 204},
 			order = 10,
 			visible = true,
 			cycle = true,
 			requiresAce = nil,
-			maxHistory = 250
+			maxHistory = 250,
+			scope = 'proximity',
+			distance = 50.0
 		},
 		global = {
 			label = 'Global',
-			color = chatConfig.globalColor or {212, 175, 55},
+			color = {212, 175, 55},
 			order = 20,
 			visible = true,
 			cycle = true,
 			requiresAce = nil,
-			maxHistory = 300
+			maxHistory = 300,
+			scope = 'global',
+			distance = nil
 		},
 		staff = {
 			label = 'Staff',
-			color = chatConfig.staffColor or {255, 64, 0},
+			color = {255, 64, 0},
 			order = 30,
 			visible = true,
 			cycle = true,
-			requiresAce = tostring(accessConfig.staffChannelAce or 'chat.staffChannel'),
-			maxHistory = 250
+			requiresAce = tostring(defaultStaffAce or 'chat.staffChannel'),
+			maxHistory = 250,
+			scope = 'permission',
+			distance = nil
 		},
 		whispers = {
 			label = 'Whispers',
-			color = chatConfig.whisperColor or {254, 127, 156},
+			color = {254, 127, 156},
 			order = 40,
 			visible = true,
 			cycle = true,
 			requiresAce = nil,
-			maxHistory = 250
+			maxHistory = 250,
+			scope = 'whisper',
+			distance = nil
 		}
 	}
 
@@ -234,6 +241,7 @@ local function buildChannelDefinitions(channelsConfig, chatConfig, accessConfig)
 
 	for channelId, defaultEntry in pairs(defaults) do
 		local override = type(channelsConfig[channelId]) == 'table' and channelsConfig[channelId] or {}
+		local explicitPermission = override.permission
 		merged[channelId] = {
 			id = channelId,
 			label = tostring(override.label or defaultEntry.label),
@@ -241,14 +249,17 @@ local function buildChannelDefinitions(channelsConfig, chatConfig, accessConfig)
 			order = tonumber(override.order) or defaultEntry.order,
 			visible = override.visible ~= false,
 			cycle = override.cycle ~= false,
-			requiresAce = isSet(override.requiresAce) and tostring(override.requiresAce) or defaultEntry.requiresAce,
-			maxHistory = normalizeHistoryLimit(override.maxHistory, defaultEntry.maxHistory)
+			requiresAce = isSet(explicitPermission) and tostring(explicitPermission) or defaultEntry.requiresAce,
+			maxHistory = normalizeHistoryLimit(override.history, defaultEntry.maxHistory),
+			scope = normalizeKey(override.scope) or defaultEntry.scope,
+			distance = tonumber(override.distance) or defaultEntry.distance
 		}
 	end
 
 	for rawId, rawEntry in pairs(channelsConfig) do
 		local channelId = normalizeKey(rawId)
 		if channelId and type(rawEntry) == 'table' and not merged[channelId] then
+			local explicitPermission = rawEntry.permission
 			merged[channelId] = {
 				id = channelId,
 				label = tostring(rawEntry.label or channelId),
@@ -256,8 +267,10 @@ local function buildChannelDefinitions(channelsConfig, chatConfig, accessConfig)
 				order = tonumber(rawEntry.order) or 100,
 				visible = rawEntry.visible ~= false,
 				cycle = rawEntry.cycle ~= false,
-				requiresAce = isSet(rawEntry.requiresAce) and tostring(rawEntry.requiresAce) or nil,
-				maxHistory = normalizeHistoryLimit(rawEntry.maxHistory, 250)
+				requiresAce = isSet(explicitPermission) and tostring(explicitPermission) or nil,
+				maxHistory = normalizeHistoryLimit(rawEntry.history, 250),
+				scope = normalizeKey(rawEntry.scope) or 'global',
+				distance = tonumber(rawEntry.distance)
 			}
 		end
 	end
@@ -807,6 +820,10 @@ end
 
 local function getNameWithRoleAndColor(source)
 	local name = getName(source)
+	if constants and constants.RolePrefixEnabled ~= true then
+		return '[' .. source .. '] ' .. name, nil
+	end
+
 	local role = nil
 	local roles = constants.Roles
 
@@ -834,23 +851,59 @@ local function setupBootstrap()
 		return
 	end
 
-	local chatConfig = Config.Chat or {}
-	local accessConfig = Config.Access or {}
-	local typingConfig = Config.TypingIndicator or {}
-	local bubbleConfig = Config.ChatBubbles or {}
-	local discordConfig = Config.Discord or {}
-	local uiConfig = Config.UI or {}
-	local runtimeConfig = Config.Runtime or {}
+	local rootConfig = type(Config) == 'table' and Config or {}
+	local settingsConfig = type(rootConfig.settings) == 'table' and rootConfig.settings or {}
+	local accessConfig = type(rootConfig.access) == 'table' and rootConfig.access or {}
+	local featureConfig = type(rootConfig.features) == 'table' and rootConfig.features or {}
+	local rawTypingConfig = type(featureConfig.typing) == 'table' and featureConfig.typing or {}
+	local rawBubbleConfig = type(featureConfig.bubbles) == 'table' and featureConfig.bubbles or {}
+	local discordConfig = type(rootConfig.discord) == 'table' and rootConfig.discord or {}
+	local uiConfig = type(rootConfig.ui) == 'table' and rootConfig.ui or {}
+	local channelsConfig = type(rootConfig.channels) == 'table' and rootConfig.channels or {}
+	local commandsConfig = type(rootConfig.commands) == 'table' and rootConfig.commands or {}
+	local routingConfig = type(rootConfig.routing) == 'table' and rootConfig.routing or {}
+	local whispersConfig = type(rootConfig.whispers) == 'table' and rootConfig.whispers or {}
+	local messagesConfig = type(rootConfig.messages) == 'table' and rootConfig.messages or {}
+	local actionMessageConfig = type(messagesConfig.action) == 'table' and messagesConfig.action or {}
+	local runtimeConfig = type(rootConfig.runtime) == 'table' and rootConfig.runtime or {}
 	local serverRuntime = type(runtimeConfig.server) == 'table' and runtimeConfig.server or {}
-	local channelsConfig = type(Config.Channels) == 'table' and Config.Channels or {}
-	local commandsConfig = type(Config.Commands) == 'table' and Config.Commands or {}
-	local commandRoutingConfig = type(Config.CommandRouting) == 'table' and Config.CommandRouting or {}
-	local whispersConfig = type(Config.Whispers) == 'table' and Config.Whispers or {}
+
+	local typingConfig = {
+		enabled = rawTypingConfig.enabled == true,
+		updateRate = tonumber(rawTypingConfig.updateRate) or 200,
+		maxDistance = tonumber(rawTypingConfig.maxDistance) or 25.0
+	}
+
+	local bubbleConfig = {
+		enabled = rawBubbleConfig.enabled == true,
+		maxDistance = tonumber(rawBubbleConfig.maxDistance) or 25.0,
+		maxLength = tonumber(rawBubbleConfig.maxLength) or 80,
+		fadeOutTime = tonumber(rawBubbleConfig.fadeOutMs) or 4000
+	}
+
+	local localChannelConfig = type(channelsConfig["local"]) == 'table' and channelsConfig["local"] or {}
+	local globalChannelConfig = type(channelsConfig.global) == 'table' and channelsConfig.global or {}
+	local staffChannelConfig = type(channelsConfig.staff) == 'table' and channelsConfig.staff or {}
+	local whisperChannelConfig = type(channelsConfig.whispers) == 'table' and channelsConfig.whispers or {}
+
+	local chatConfig = {
+		maxNicknameLen = settingsConfig.maxNicknameLen,
+		printToConsole = settingsConfig.printToConsole,
+		localColor = localChannelConfig.color,
+		globalColor = globalChannelConfig.color,
+		staffColor = staffChannelConfig.color,
+		whisperColor = whisperChannelConfig.color,
+		whisperEchoColor = messagesConfig.whisperOutgoingColor,
+		actionColor = actionMessageConfig.color,
+		actionDistance = actionMessageConfig.distance,
+		localDistance = localChannelConfig.distance
+	}
 
 	local identifierType = tostring(accessConfig.identifier or 'license')
 	local staffChannelAce = tostring(accessConfig.staffChannelAce or 'chat.staffChannel')
 	local noMuteAce = tostring(accessConfig.noMuteAce or 'chat.noMute')
 	local roles = type(accessConfig.roles) == 'table' and accessConfig.roles or {}
+	local rolePrefixEnabled = accessConfig.rolePrefixEnabled == true
 
 	local maxNicknameLen = math.max(1, tonumber(chatConfig.maxNicknameLen) or 30)
 	local printToConsole = chatConfig.printToConsole ~= false
@@ -860,12 +913,12 @@ local function setupBootstrap()
 	local actionMessageDistance = tonumber(chatConfig.actionDistance) or 50.0
 	local localMessageDistance = tonumber(chatConfig.localDistance) or 50.0
 
-	local channelList, channelById = buildChannelDefinitions(channelsConfig, chatConfig, accessConfig)
-	local keepLegacyAliases = commandRoutingConfig.keepLegacyAliases ~= false
+	local channelList, channelById = buildChannelDefinitions(channelsConfig, staffChannelAce)
+	local keepLegacyAliases = routingConfig.keepLegacyAliases == true
 	local commandByKey = buildCommandDefinitions(commandsConfig, keepLegacyAliases)
 	local commandNameToKey = buildCommandNameLookup(commandByKey)
 
-	local defaultChannelId = normalizeKey(commandRoutingConfig.defaultChannel) or 'global'
+	local defaultChannelId = normalizeKey(routingConfig.defaultChannel) or 'global'
 	if not channelById[defaultChannelId] then
 		if channelById.global then
 			defaultChannelId = 'global'
@@ -882,7 +935,7 @@ local function setupBootstrap()
 		singleChannelId = defaultChannelId
 	end
 
-	local whisperTabEnabled = whispersConfig.separateWhisperTab ~= false
+	local whisperTabEnabled = whispersConfig.tabEnabled ~= false
 	local whisperFallbackChannelId = normalizeKey(whispersConfig.fallbackChannel) or defaultChannelId
 	if whisperFallbackChannelId == 'whispers' or not channelById[whisperFallbackChannelId] then
 		whisperFallbackChannelId = defaultChannelId
@@ -916,7 +969,7 @@ local function setupBootstrap()
 		end
 	end
 
-	local commandRoutingOverrides = buildRoutingOverrides(commandRoutingConfig.overrides, channelById)
+	local commandRoutingOverrides = buildRoutingOverrides(routingConfig.overrides, channelById)
 	if not whisperTabEnabled then
 		local whisperRoutingKeys = {'whisper', 'dm', 'msg', 'reply', 'r'}
 		for i = 1, #whisperRoutingKeys do
@@ -930,9 +983,11 @@ local function setupBootstrap()
 			commandByKey.reply.channel = whisperFallbackChannelId
 		end
 	end
-	local commandResponseWindowMs = math.max(100, tonumber(commandRoutingConfig.responseWindowMs) or 1500)
+	local commandResponseWindowMs = math.max(100, tonumber(routingConfig.responseWindowMs) or 1500)
 
 	Server.config = {
+		settings = settingsConfig,
+		messages = messagesConfig,
 		chat = chatConfig,
 		access = accessConfig,
 		typing = typingConfig,
@@ -941,7 +996,7 @@ local function setupBootstrap()
 		runtime = serverRuntime,
 		channels = channelsConfig,
 		commands = commandsConfig,
-		commandRouting = commandRoutingConfig,
+		commandRouting = routingConfig,
 		whispers = whispersConfig
 	}
 
@@ -951,6 +1006,7 @@ local function setupBootstrap()
 		NoMuteAce = noMuteAce,
 		AccessDisplayNameResolver = type(accessConfig.getDisplayName) == 'function' and accessConfig.getDisplayName or nil,
 		Roles = roles,
+		RolePrefixEnabled = rolePrefixEnabled,
 		MaxNicknameLen = maxNicknameLen,
 		PrintToConsole = printToConsole,
 		LocalMessageColor = localMessageColor,

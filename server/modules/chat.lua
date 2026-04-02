@@ -355,24 +355,104 @@ local function sendWhisperTargets(source)
 	TriggerClientEvent('poodlechat:whisperTargets', source, targets)
 end
 
+local function getFirstAccessibleChannelIdForSource(source)
+	local list = constants.ChannelList or {}
+	for i = 1, #list do
+		local channel = list[i]
+		if channel and channel.id and Server.canAccessChannel(source, channel.id) then
+			return channel.id
+		end
+	end
+
+	return constants.DefaultChannelId
+end
+
+local function resolveExportChannelForSource(source, requested)
+	local channelId = Server.normalizeKey(requested) or constants.DefaultChannelId
+
+	if channelId == 'whispers' and constants.WhisperTabEnabled ~= true then
+		channelId = Server.normalizeKey(constants.WhisperFallbackChannelId) or constants.DefaultChannelId
+	end
+
+	if not constants.ChannelById[channelId] then
+		channelId = constants.DefaultChannelId
+	end
+
+	if not Server.canAccessChannel(source, channelId) then
+		channelId = getFirstAccessibleChannelIdForSource(source)
+	end
+
+	if not constants.ChannelById[channelId] then
+		channelId = constants.DefaultChannelId
+	end
+
+	return channelId
+end
+
+local function normalizeExportTargets(target)
+	local normalized = {}
+	local seen = {}
+
+	local function appendPlayerId(playerId)
+		if playerId == nil then
+			return
+		end
+
+		local key = tostring(playerId)
+		if seen[key] then
+			return
+		end
+
+		seen[key] = true
+		normalized[#normalized + 1] = key
+	end
+
+	local function appendTarget(value)
+		local playerId = getPlayerId(value)
+		if not playerId then
+			return
+		end
+
+		appendPlayerId(playerId)
+	end
+
+	if target == nil or tonumber(target) == -1 then
+		local players = GetPlayers()
+		for i = 1, #players do
+			appendPlayerId(players[i])
+		end
+		return normalized
+	end
+
+	if type(target) == 'table' then
+		for i = 1, #target do
+			appendTarget(target[i])
+		end
+		return normalized
+	end
+
+	appendTarget(target)
+	return normalized
+end
+
 local function sendChannelMessageExport(target, payload)
 	if type(payload) ~= 'table' then
 		return false
 	end
 
-	local channelId = Server.normalizeKey(payload.channel) or constants.DefaultChannelId
-	if not constants.ChannelById[channelId] then
-		channelId = constants.DefaultChannelId
+	local targets = normalizeExportTargets(target)
+	if #targets == 0 then
+		return false
 	end
 
-	local targets = nil
-	if type(target) == 'number' or type(target) == 'string' then
-		targets = {target}
-	elseif type(target) == 'table' then
-		targets = target
+	local requestedChannelId = Server.normalizeKey(payload.channel) or constants.DefaultChannelId
+
+	for i = 1, #targets do
+		local targetSource = targets[i]
+		local resolvedChannelId = resolveExportChannelForSource(targetSource, requestedChannelId)
+		sendRawChannelMessage({targetSource}, resolvedChannelId, payload)
 	end
 
-	sendRawChannelMessage(targets, channelId, payload)
 	return true
 end
 
@@ -412,6 +492,10 @@ local function getMessageChannelForInput(source, requested)
 	end
 
 	if not Server.canAccessChannel(source, channelId) then
+		channelId = getFirstAccessibleChannelIdForSource(source)
+	end
+
+	if not constants.ChannelById[channelId] then
 		channelId = constants.DefaultChannelId
 	end
 
