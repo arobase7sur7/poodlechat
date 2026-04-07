@@ -1,41 +1,43 @@
-# poodlechat
+# PoodleChat (Reworked)
 
-Lightweight FiveM chat resource with:
+A modern chat resource for FiveM with channel tabs, whispers, voice-range integration, grouping, notifications, and emoji support.
 
-- Local / global / staff / whisper channels
-- Whisper conversations and sidebar
-- Distance mode widget with voice range hooks
+![PoodleChat Showcase](docs/assets/showcase.png)
+
+## Why my PoodleChat fork
+
+- Multi-channel chat (`local`, `global`, `staff`, `whispers`, custom)
+- Per-player tab grouping with persistence
+- Per-tab notification toggles + global notification control
+- pma-voice range integration for labels and color mapping
 - Typing indicators and chat bubbles
-- Emoji panel (recent + top usage)
+- Emoji panel with recent and top-used tracking
 - Optional Discord webhook forwarding
 
 ## Requirements
 
-- FiveM server (GTA V)
-- Optional: [pma-voice](https://github.com/AvarianKnight/pma-voice) for distance integration
+- Optional: `pma-voice` (only needed if `voice.enabled = true`)
 
 ## Installation
 
-1. Put `poodlechat` in your `resources` directory.
-2. Add to `server.cfg`:
+1. Place `poodlechat` in your `resources` folder
+2. Add this to `server.cfg`
 
 ```cfg
 ensure poodlechat
 ```
 
-3. Disable default chat if needed:
+3. Disable default chat
 
 ```cfg
 # ensure chat
 ```
 
-4. Configure `shared/config.lua`.
+4. Configure `shared/config.lua`
 
-## Config Schema
+## Config Overview
 
-`shared/config.lua` is new-schema-only.
-
-Top-level keys:
+Top-level sections:
 
 - `settings`
 - `channels`
@@ -43,79 +45,46 @@ Top-level keys:
 - `commands`
 - `routing`
 - `whispers`
+- `tabs`
+- `notifications`
+- `voice`
 - `access`
 - `ui`
 - `emoji`
-- `distance`
 - `features`
 - `discord`
 - `runtime`
 
-### Channels
+### Voice Color Stops
 
-Each channel entry supports:
+You can define as many middle colors as needed between `colorMin` and `colorMax`.
 
-- `label`
-- `color`
-- `order`
-- `history`
-- `visible`
-- `cycle`
-- `canSend` (`false` makes a read-only tab that can receive messages but not send plain chat input)
-- `scope`
-- `distance` (for proximity channels)
-- `permission` (for restricted channels)
+```lua
+voice = {
+  enabled = true,
+  resource = 'pma-voice',
+  fallbackLocalDistance = 50.0,
+  colors = {
+    colorMin = '#2e85cc',
+    intermediate = {'#f1c40f', '#e67e22', '#ff8c42'},
+    colorMax = '#e74c3c'
+  }
+}
+```
 
-### Distance
+Alternative format is also supported:
 
-Distance UI and cycling are driven by:
+```lua
+colors = {
+  colorMin = '#2e85cc',
+  intermediate = {'#f1c40f'},
+  intermediate2 = '#e67e22',
+  intermediate3 = '#ff8c42',
+  colorMax = '#e74c3c'
+}
+```
 
-- `distance.enabled`
-- `distance.default`
-- `distance.pollRate`
-- `distance.getCurrent`
-- `distance.getLabel`
-- `distance.setCurrent`
-- `distance.modes` (`id`, `label`, `distance`, `color`)
-- `distance.ui` (`useModeLabels`, `dynamic`)
-
-### Typing / Bubbles
-
-- `features.typing`
-- `features.bubbles`
-
-Typing includes:
-
-- `headTracking`
-- `offset`
-- `screenLift`
-
-### Whispers
-
-- `whispers.tabEnabled`
-- `whispers.fallbackChannel`
-- `whispers.maxConversations`
-- `whispers.maxMessagesPerConversation`
-- `whispers.defaultConversationMode`
-- `whispers.notification`
-- `whispers.sidebar`
-
-Whisper notification sound supports:
-
-- `whispers.notification.sound`
-- `whispers.notification.fallbackSound`
-
-Default profile:
-
-- Primary: `TENNIS_POINT_WON` / `HUD_AWARDS`
-- Fallback: `SELECT` / `HUD_FRONTEND_DEFAULT_SOUNDSET`
-
-### Access / Role Prefix
-
-- `access.rolePrefixEnabled` defaults to `false`
-- Staff/admin role label prefix is hidden unless this is explicitly enabled
-
-## Commands (Default)
+## Default Commands
 
 - `/global`, `/g`
 - `/say`
@@ -128,61 +97,51 @@ Default profile:
 - `/toggleoverhead`
 - `/toggletyping`
 - `/togglebubbles`
+- `/togglesound`, `/sound`
 - `/report`
 - `/mute`
 - `/unmute`
 - `/muted`
 - `/nick`
 
-## Notes
+## Exports
 
-- OOC is not part of the default command set.
-- Admin/staff prefix display is disabled by default.
-- Distance mode count is derived safely from configured modes and player proximity state.
-
-## Dev Notes (Exports)
-
-Server exports:
+### Server
 
 - `exports['poodlechat']:SendChannelMessage(target, payload)`
-  - `target`: player target(s). Accepts a single player id (`number`/`string`), a list of ids (`table`), or broadcast (`nil`/`-1`).
-  - `payload`: message envelope table.
-  - `payload.channel`: optional channel id (`'global'`, `'local'`, `'staff'`, etc.). Falls back automatically if invalid/inaccessible.
-  - `payload.label`: optional author/header label used when `payload.args` is not provided.
-  - `payload.text`: optional message text used when `payload.args` is not provided.
-  - `payload.args`: optional explicit chat args array passed to chat template (example: `{ '[Staff] Admin', 'Message' }`).
-  - `payload.color`: optional RGB table `{r, g, b}`.
-  - `payload.template`: optional custom chat template string.
-  - `payload.templateId`: optional UI template id.
-  - `payload.multiline`: optional boolean; defaults to `true`.
-  - `payload.metadata`: optional extra metadata table.
-  - Returns `true` if at least one target received processing, otherwise `false`.
 - `exports['poodlechat']:SendBubbleMessage(sourceId, text)`
-  - `sourceId`: player id the bubble should appear above.
-  - `text`: bubble text (normalized and length-limited by config).
-  - Returns `true` on accepted input, otherwise `false`.
 
-Client exports:
+`SendChannelMessage` supports:
+
+- `target`: single id, table of ids, `nil`, or `-1`
+- `payload.channel`
+- `payload.label`
+- `payload.text`
+- `payload.args`
+- `payload.color`
+- `payload.template`
+- `payload.templateId`
+- `payload.multiline`
+- `payload.metadata`
+
+### Client
 
 - `exports['poodlechat']:AddChannelMessage(payload)`
-  - `payload.channel`: optional target channel id.
-  - `payload.label`: optional fallback label.
-  - `payload.text` / `payload.message`: optional fallback text when `payload.args` is not provided.
-  - `payload.args`: optional explicit chat args array.
-  - `payload.color`: optional RGB table `{r, g, b}`.
-  - `payload.template`: optional custom chat template string.
-  - `payload.templateId`: optional UI template id.
-  - `payload.multiline`: optional boolean; defaults to `true`.
-  - `payload.metadata`: optional extra metadata table.
-  - Returns `(true, resolvedChannelId)`.
 - `exports['poodlechat']:SetChannel(channelId)`
-  - `channelId`: requested channel id to switch to.
-  - Returns `(true, resolvedChannelId)`.
 
-Behavior notes:
+Behavior:
 
-- `payload.channel` is optional. Unknown channel ids automatically fall back.
-- If `target` cannot access the requested channel/tab, the message is sent to that target on the first allowed channel, then default channel as final fallback.
-- If whisper tab is disabled, whisper-targeted messages are rerouted to whisper fallback/default channel.
-- `AddChannelMessage` returns `(true, resolvedChannelId)`.
-- `SetChannel` returns `(true, resolvedChannelId)` and always resolves to a valid accessible channel.
+- Invalid or inaccessible channels resolve automatically
+- Whisper fallback is respected when whisper tab is disabled
+- `AddChannelMessage` returns `(true, resolvedChannelId)`
+- `SetChannel` returns `(true, resolvedChannelId)`
+
+## Notes
+
+- Staff visibility and access depend on ACE permissions
+- Notifications are per-tab and persist via KVP
+- Grouping and sound preferences are per-player and persist via KVP
+
+---
+
+<sub>README generated using AI assistance</sub>
