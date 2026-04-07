@@ -307,7 +307,11 @@ Config = {
 			dm = 'whispers',
 			reply = 'whispers',
 			r = 'whispers',
-			showid = 'local'
+			showid = 'local',
+			twt = 'local',
+			dispatch = 'local',
+			darkweb = 'local',
+			news = 'local'
 		}
 	},
 
