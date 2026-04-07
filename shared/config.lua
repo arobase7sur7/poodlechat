@@ -15,7 +15,7 @@ Config = {
 			-- Tab color in RGB format
 			color = {255, 0, 255},
 			-- Tab order in the channel list, lower numbers are shown first, you don't have to use sequential numbers, just make sure the order values are correct relative to each other
-			order = 20,
+			order = 4,
 			-- Maximum messages kept in this tab
 			history = 250,
 			-- Shows this tab in UI when true
@@ -33,7 +33,7 @@ Config = {
 		["local"] = {
 			label = 'RP',
 			color = {0, 153, 204},
-			order = 30,
+			order = 1,
 			history = 250,
 			visible = true,
 			cycle = true,
@@ -44,7 +44,7 @@ Config = {
 		global = {
 			label = 'OOC',
 			color = {212, 175, 55},
-			order = 40,
+			order = 2,
 			history = 300,
 			visible = true,
 			cycle = true,
@@ -55,7 +55,7 @@ Config = {
 		staff = {
 			label = 'Staff',
 			color = {255, 64, 0},
-			order = 50,
+			order = 5,
 			history = 250,
 			visible = true,
 			cycle = true,
@@ -68,7 +68,7 @@ Config = {
 		whispers = {
 			label = 'Whispers',
 			color = {254, 127, 156},
-			order = 10,
+			order = 3,
 			history = 250,
 			visible = true,
 			cycle = true,
