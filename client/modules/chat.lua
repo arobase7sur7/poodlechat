@@ -3,6 +3,9 @@ local State = nil
 local config = nil
 local constants = nil
 local handlersRegistered = false
+local tabGroupingKvpKey = 'poodlechat:tabGrouping:v1'
+local tabNotificationKvpKey = 'poodlechat:tabNotifications:v1'
+local notificationSoundKvpKey = 'poodlechat:notificationSound:v1'
 
 local function ensureContext()
 	if State and config and constants then
@@ -23,6 +26,172 @@ end
 local function getChannel(channelId)
 	local id = Client.normalizeKey(channelId) or constants.defaultChannelId
 	return constants.channelById[id] or constants.channelById[constants.defaultChannelId]
+end
+
+local function formatVoiceModeLabel(rawMode)
+	if type(rawMode) ~= 'string' then
+		return nil
+	end
+
+	local cleaned = rawMode:gsub('^%s+', ''):gsub('%s+$', '')
+	if cleaned == '' then
+		return nil
+	end
+
+	cleaned = cleaned:gsub('[_%-]+', ' '):gsub('%s+', ' '):lower()
+	cleaned = cleaned:gsub('(%a)([%w\']*)', function(first, rest)
+		return string.upper(first) .. rest
+	end)
+
+	return cleaned
+end
+
+local function getVoiceProximityForSource(sourceId)
+	if constants.voiceEnabled ~= true or GetResourceState(tostring(constants.voiceResourceName or 'pma-voice')) ~= 'started' then
+		return nil
+	end
+
+	local proximity = nil
+	local sourceNumber = tonumber(sourceId)
+	if sourceNumber then
+		local playerId = GetPlayerFromServerId(sourceNumber)
+		if playerId ~= -1 then
+			local player = Player(playerId)
+			if player and type(player.state) == 'table' and type(player.state.proximity) == 'table' then
+				proximity = player.state.proximity
+			end
+		end
+	end
+
+	if type(proximity) ~= 'table' and type(LocalPlayer) == 'table' and type(LocalPlayer.state) == 'table' then
+		local localProximity = LocalPlayer.state.proximity
+		if type(localProximity) == 'table' then
+			proximity = localProximity
+		end
+	end
+
+	if type(proximity) ~= 'table' then
+		return nil
+	end
+
+	return proximity
+end
+
+local function getVoiceModeLabelForSource(sourceId)
+	local proximity = getVoiceProximityForSource(sourceId)
+	if type(proximity) ~= 'table' then
+		return nil
+	end
+
+	return formatVoiceModeLabel(proximity.mode)
+end
+
+local function getLocalChannelDisplayLabel(sourceId)
+	if constants.voiceEnabled == true and GetResourceState(tostring(constants.voiceResourceName or 'pma-voice')) == 'started' then
+		local modeLabel = getVoiceModeLabelForSource(sourceId)
+		if modeLabel and modeLabel ~= '' then
+			return modeLabel
+		end
+		return 'Range'
+	end
+
+	local channel = getChannel('local')
+	return channel and channel.label or 'Local'
+end
+
+local function normalizeVoiceModeIndex(rawIndex, modeCount)
+	local value = tonumber(rawIndex)
+	if not value then
+		return nil
+	end
+
+	local index = math.floor(value + 0.5)
+	if index <= 0 then
+		return nil
+	end
+
+	local total = tonumber(modeCount)
+	if not total or total <= 0 then
+		return index
+	end
+
+	total = math.max(1, math.floor(total + 0.5))
+	if index > total and (index - 1) >= 1 and (index - 1) <= total then
+		return index - 1
+	end
+
+	return Client.clamp(index, 1, total)
+end
+
+local function getClosestVoiceModeIndexByDistance(distance)
+	if type(State.voiceModes) ~= 'table' or #State.voiceModes == 0 then
+		return nil
+	end
+
+	local bestIndex = nil
+	local bestDiff = math.huge
+
+	for i = 1, #State.voiceModes do
+		local mode = State.voiceModes[i]
+		local modeRange = tonumber(mode and mode.range)
+		local modeIndex = normalizeVoiceModeIndex(mode and mode.index, #State.voiceModes)
+		if modeRange and modeIndex then
+			local diff = math.abs(distance - modeRange)
+			if diff < bestDiff then
+				bestDiff = diff
+				bestIndex = modeIndex
+			end
+		end
+	end
+
+	return bestIndex
+end
+
+local function getVoiceColorForSource(sourceId)
+	if constants.voiceEnabled ~= true or GetResourceState(tostring(constants.voiceResourceName or 'pma-voice')) ~= 'started' then
+		return nil
+	end
+
+	local proximity = getVoiceProximityForSource(sourceId)
+	if type(proximity) ~= 'table' then
+		return nil
+	end
+
+	local colorLevels = type(State.voiceLevelColors) == 'table' and State.voiceLevelColors or {}
+	local modeCount = tonumber(State.distanceModeCount)
+	if not modeCount or modeCount <= 0 then
+		modeCount = #colorLevels
+	end
+	if modeCount <= 0 then
+		return nil
+	end
+
+	local modeIndex = normalizeVoiceModeIndex(proximity.index, modeCount)
+	if not modeIndex then
+		local distance = tonumber(proximity.distance)
+		if distance then
+			modeIndex = getClosestVoiceModeIndexByDistance(distance)
+		end
+	end
+	if not modeIndex then
+		return nil
+	end
+
+	local colorHex = tostring(colorLevels[modeIndex] or '')
+	if colorHex == '' then
+		return nil
+	end
+
+	local parsed = Client.hexColorToRgb(colorHex, nil)
+	if type(parsed) ~= 'table' then
+		return nil
+	end
+
+	return {
+		tonumber(parsed[1]) or 255,
+		tonumber(parsed[2]) or 255,
+		tonumber(parsed[3]) or 255
+	}
 end
 
 local function getFirstAccessibleChannelId()
@@ -73,6 +242,90 @@ local function normalizeLimit(value, fallback)
 	end
 
 	return number
+end
+
+local function buildDefaultTabGrouping()
+	local defaults = {}
+	local maxGroup = 0
+	local configured = type(constants.defaultTabGrouping) == 'table' and constants.defaultTabGrouping or {}
+
+	for i = 1, #constants.channelList do
+		local channelId = constants.channelList[i].id
+		local groupId = tonumber(configured[channelId])
+		if groupId and groupId > 0 then
+			groupId = math.floor(groupId)
+			defaults[channelId] = groupId
+			if groupId > maxGroup then
+				maxGroup = groupId
+			end
+		end
+	end
+
+	for i = 1, #constants.channelList do
+		local channelId = constants.channelList[i].id
+		if not defaults[channelId] then
+			maxGroup = maxGroup + 1
+			defaults[channelId] = maxGroup
+		end
+	end
+
+	return defaults
+end
+
+local function normalizeTabGrouping(rawGrouping)
+	local normalized = {}
+	local highestGroup = 0
+
+	if type(rawGrouping) == 'table' then
+		for i = 1, #constants.channelList do
+			local channelId = constants.channelList[i].id
+			local groupId = tonumber(rawGrouping[channelId])
+			if groupId and groupId > 0 then
+				groupId = math.floor(groupId)
+				normalized[channelId] = groupId
+				if groupId > highestGroup then
+					highestGroup = groupId
+				end
+			end
+		end
+	end
+
+	local defaults = buildDefaultTabGrouping()
+	for i = 1, #constants.channelList do
+		local channelId = constants.channelList[i].id
+		if not normalized[channelId] then
+			local fallbackGroup = tonumber(defaults[channelId])
+			if fallbackGroup and fallbackGroup > 0 then
+				fallbackGroup = math.floor(fallbackGroup)
+				normalized[channelId] = fallbackGroup
+				if fallbackGroup > highestGroup then
+					highestGroup = fallbackGroup
+				end
+			else
+				highestGroup = highestGroup + 1
+				normalized[channelId] = highestGroup
+			end
+		end
+	end
+
+	return normalized
+end
+
+local function normalizeTabNotificationToggles(rawToggles)
+	local normalized = {}
+	if type(rawToggles) ~= 'table' then
+		return normalized
+	end
+
+	for i = 1, #constants.channelList do
+		local channelId = constants.channelList[i].id
+		local value = rawToggles[channelId]
+		if value ~= nil then
+			normalized[channelId] = value == true or value == 'true'
+		end
+	end
+
+	return normalized
 end
 
 local function normalizeMessagePayload(message)
@@ -239,7 +492,10 @@ local function loadSavedSettings()
 	end
 
 	if State.whisperSoundToggleAllowed then
-		local whisperSoundSaved = GetResourceKvpString('whisperSoundEnabled')
+		local whisperSoundSaved = GetResourceKvpString(notificationSoundKvpKey)
+		if whisperSoundSaved ~= 'true' and whisperSoundSaved ~= 'false' then
+			whisperSoundSaved = GetResourceKvpString('whisperSoundEnabled')
+		end
 		if whisperSoundSaved == 'true' then
 			State.whisperSoundEnabled = true
 		elseif whisperSoundSaved == 'false' then
@@ -255,6 +511,12 @@ local function loadSavedSettings()
 			State.autoScrollEnabled = false
 		end
 	end
+
+	local tabGroupingSaved = Client.decodeJson(GetResourceKvpString(tabGroupingKvpKey))
+	State.TabGrouping = normalizeTabGrouping(tabGroupingSaved)
+
+	local tabNotificationSaved = Client.decodeJson(GetResourceKvpString(tabNotificationKvpKey))
+	State.TabNotificationToggles = normalizeTabNotificationToggles(tabNotificationSaved)
 
 	Client.markEmojiDirty()
 end
@@ -394,6 +656,62 @@ local function getAllowedChannelsPayload()
 	return channels
 end
 
+local function getNotificationProfilesPayload()
+	local defaultProfile = type(constants.notificationDefaultProfile) == 'table' and constants.notificationDefaultProfile or {}
+	local byChannel = type(constants.notificationByChannel) == 'table' and constants.notificationByChannel or {}
+	local channels = {}
+
+	for i = 1, #constants.channelList do
+		local channelId = constants.channelList[i].id
+		local profile = byChannel[channelId]
+		if type(profile) == 'table' then
+			channels[channelId] = profile
+		end
+	end
+
+	return defaultProfile, channels
+end
+
+local function setTabGrouping(rawGrouping)
+	if not ensureContext() then
+		return {}
+	end
+
+	State.TabGrouping = normalizeTabGrouping(rawGrouping)
+	Client.encodeAndStore(tabGroupingKvpKey, State.TabGrouping)
+	return State.TabGrouping
+end
+
+local function setTabNotificationToggle(channelId, enabled)
+	if not ensureContext() then
+		return nil
+	end
+
+	local normalizedChannelId = Client.normalizeKey(channelId)
+	if not normalizedChannelId or not constants.channelById[normalizedChannelId] then
+		return nil
+	end
+
+	if type(State.TabNotificationToggles) ~= 'table' then
+		State.TabNotificationToggles = {}
+	end
+
+	State.TabNotificationToggles[normalizedChannelId] = enabled == true
+	Client.encodeAndStore(tabNotificationKvpKey, State.TabNotificationToggles)
+	Client.sendFeatureState()
+	return State.TabNotificationToggles[normalizedChannelId]
+end
+
+local function getTabNotificationToggles()
+	if not ensureContext() then
+		return {}
+	end
+	if type(State.TabNotificationToggles) ~= 'table' then
+		State.TabNotificationToggles = {}
+	end
+	return State.TabNotificationToggles
+end
+
 local function buildOnLoadPayload()
 	if not ensureContext() then
 		return {}
@@ -407,10 +725,21 @@ local function buildOnLoadPayload()
 	Client.refreshDistanceState(true)
 	Client.sendFeatureState()
 
+	local notificationDefaultProfile, notificationChannels = getNotificationProfilesPayload()
+
 	return {
 		playerServerId = GetPlayerServerId(PlayerId()),
 		channels = getAllowedChannelsPayload(),
 		activeChannel = State.Channel,
+		tabs = {
+			grouping = State.TabGrouping,
+			defaultGrouping = buildDefaultTabGrouping()
+		},
+		notifications = {
+			default = notificationDefaultProfile,
+			channels = notificationChannels,
+			toggles = getTabNotificationToggles()
+		},
 		whispers = {
 			maxConversations = normalizeLimit(config.whispers.maxConversations, 30),
 			maxMessagesPerConversation = normalizeLimit(config.whispers.maxMessagesPerConversation, 80),
@@ -475,6 +804,13 @@ local function addEnvelopeToChat(message)
 	local license = metadata.license or message.license
 	if isMutedLicense(license) then
 		return
+	end
+
+	if normalized.channel == 'local' and metadata.type == 'chat' then
+		local rangeColor = getVoiceColorForSource(metadata.source)
+		if rangeColor then
+			normalized.color = rangeColor
+		end
 	end
 
 	if metadata.source and State.DisplayMessagesAbovePlayers then
@@ -571,6 +907,11 @@ local function executeClientCommand(commandKey, commandName, args)
 		return
 	end
 
+	if handler == 'togglesound' then
+		Client.toggleWhisperSound()
+		return
+	end
+
 	if handler == 'togglechat' then
 		State.HideChat = not State.HideChat
 		return
@@ -628,6 +969,7 @@ local function registerConfiguredCommands()
 		toggleoverhead = true,
 		toggletyping = true,
 		togglebubbles = true,
+		togglesound = true,
 		togglechat = true,
 		staff = true,
 		report = true,
@@ -695,11 +1037,12 @@ local function registerChatHandlers()
 		end
 
 		if Client.isInProximity(id, State.LocalMessageDistance) then
+			local localLabel = getLocalChannelDisplayLabel(id)
 			addEnvelopeToChat({
 				channel = 'local',
-				label = getChannel('local').label,
+				label = localLabel,
 				color = color,
-				args = {'[' .. getChannel('local').label .. '] ' .. name, message},
+				args = {'[' .. localLabel .. '] ' .. name, message},
 				metadata = {
 					type = 'chat',
 					source = id,
@@ -816,6 +1159,7 @@ local function registerChatHandlers()
 			State.Channel = constants.defaultChannelId
 			setChannel(State.Channel)
 		end
+		Client.sendFeatureState()
 
 		Client.sendNuiMessage({
 			type = 'setPermissions',
@@ -886,7 +1230,7 @@ local function registerChatHandlers()
 
 	exports('AddChannelMessage', function(payload)
 		local normalized = normalizeMessagePayload(payload or {})
-		TriggerEvent('chat:addMessage', normalized)
+		addEnvelopeToChat(normalized)
 		return true, normalized.channel
 	end)
 
@@ -910,4 +1254,7 @@ Client.registerStartupSuggestions = registerStartupSuggestions
 Client.refreshCommands = refreshCommands
 Client.refreshThemes = refreshThemes
 Client.buildOnLoadPayload = buildOnLoadPayload
+Client.setTabGrouping = setTabGrouping
+Client.setTabNotificationToggle = setTabNotificationToggle
+Client.getTabNotificationToggles = getTabNotificationToggles
 Client.registerChatHandlers = registerChatHandlers

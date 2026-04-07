@@ -103,6 +103,98 @@ local function emitBubble(source, text)
 	Server.triggerClientEventForTargetsNoFallback('poodlechat:bubbleMessage', recipients, source, message)
 end
 
+local function isVoiceIntegrationAvailable()
+	if constants.VoiceEnabled ~= true then
+		return false
+	end
+
+	if GetResourceState(tostring(constants.VoiceResourceName or 'pma-voice')) ~= 'started' then
+		return false
+	end
+
+	return true
+end
+
+local function getVoiceProximityStateForSource(source)
+	if not isVoiceIntegrationAvailable() then
+		return nil
+	end
+
+	local player = Player(source)
+	if not player or type(player.state) ~= 'table' then
+		return nil
+	end
+
+	local proximity = player.state.proximity
+	if type(proximity) ~= 'table' then
+		return nil
+	end
+
+	return proximity
+end
+
+local function formatVoiceModeLabel(rawMode)
+	if type(rawMode) ~= 'string' then
+		return nil
+	end
+
+	local cleaned = rawMode:gsub('^%s+', ''):gsub('%s+$', '')
+	if cleaned == '' then
+		return nil
+	end
+
+	cleaned = cleaned:gsub('[_%-]+', ' '):gsub('%s+', ' '):lower()
+	cleaned = cleaned:gsub('(%a)([%w\']*)', function(first, rest)
+		return string.upper(first) .. rest
+	end)
+
+	return cleaned
+end
+
+local function getVoiceRangeForSource(source)
+	local proximity = getVoiceProximityStateForSource(source)
+	if type(proximity) ~= 'table' then
+		return nil
+	end
+
+	local distance = tonumber(proximity.distance)
+	if not distance or distance <= 0 then
+		return nil
+	end
+
+	return distance
+end
+
+local function getVoiceModeLabelForSource(source)
+	local proximity = getVoiceProximityStateForSource(source)
+	if type(proximity) ~= 'table' then
+		return nil
+	end
+
+	local modeLabel = formatVoiceModeLabel(proximity.mode)
+	if modeLabel and modeLabel ~= '' then
+		return modeLabel
+	end
+
+	return nil
+end
+
+local function getLocalChannelDisplayLabel(source)
+	if isVoiceIntegrationAvailable() then
+		local voiceLabel = getVoiceModeLabelForSource(source)
+		if voiceLabel and voiceLabel ~= '' then
+			return voiceLabel
+		end
+		return 'Range'
+	end
+
+	return getChannel('local').label
+end
+
+local function getLocalChatDistanceForSource(source)
+	return getVoiceRangeForSource(source) or tonumber(constants.VoiceFallbackLocalDistance) or constants.LocalMessageDistance
+end
+
 local function getChannelRecipients(source, channelId)
 	local channel = getChannel(channelId)
 	if not channel then
@@ -110,7 +202,7 @@ local function getChannelRecipients(source, channelId)
 	end
 
 	if channel.id == 'local' then
-		return Server.getNearbyPlayers(source, constants.LocalMessageDistance)
+		return Server.getNearbyPlayers(source, getLocalChatDistanceForSource(source))
 	end
 
 	if channel.id == 'staff' then
@@ -200,7 +292,7 @@ end
 
 local function localMessage(source, message)
 	return routePlayerMessageToChannel(source, 'local', message, {
-		label = getChannel('local').label,
+		label = getLocalChannelDisplayLabel(source),
 		discordKind = 'local'
 	})
 end
@@ -603,19 +695,15 @@ local function registerChatHandlers()
 	end)
 
 	AddEventHandler('chat:init', function()
-		sendRawChannelMessage(nil, constants.DefaultChannelId, {
-			label = getChannel(constants.DefaultChannelId).label,
-			color = {255, 255, 255},
-			args = {'^2* ' .. Server.getName(source) .. '^r^2 joined.'},
-			metadata = {
-				type = 'join'
-			}
-		})
 		Server.refreshCommands(source)
 		setPermissions(source)
 	end)
 
-	AddEventHandler('onServerResourceStart', function()
+	AddEventHandler('onServerResourceStart', function(resName)
+		if resName ~= GetCurrentResourceName() then
+			return
+		end
+
 		Wait(constants.refreshCommandsDelayMs)
 
 		for _, player in ipairs(GetPlayers()) do

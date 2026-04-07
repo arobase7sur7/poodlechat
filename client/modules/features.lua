@@ -5,9 +5,12 @@ local constants = nil
 local uiConfig = nil
 local typingConfig = nil
 local bubbleConfig = nil
-local distanceConfig = nil
-local distanceUiConfig = nil
+local voiceConfig = nil
 local handlersRegistered = false
+local refreshDistanceState = nil
+local isTabSoundEnabled = nil
+local hasAnyUnmutedNotificationTab = nil
+local getNotificationToggleState = nil
 
 local function ensureContext()
 	if State and config and constants then
@@ -25,8 +28,7 @@ local function ensureContext()
 	uiConfig = config.ui or {}
 	typingConfig = config.typing or {}
 	bubbleConfig = config.bubble or {}
-	distanceConfig = config.distance or {}
-	distanceUiConfig = config.distanceUi or {}
+	voiceConfig = config.voice or {}
 
 	return true
 end
@@ -99,264 +101,6 @@ local function dedupeAndSortRanges(ranges)
 	return list
 end
 
-local function createDistanceExpressionExecutor(cacheKey, sourceCode, withRange)
-	if type(sourceCode) ~= 'string' or sourceCode == '' then
-		return nil
-	end
-
-	local key = cacheKey .. '\0' .. sourceCode
-	local cached = State.distanceExpressionCache[key]
-
-	if cached ~= nil then
-		if cached == false then
-			return nil
-		end
-		return cached
-	end
-
-	local wrapper
-
-	if withRange then
-		wrapper = 'return function(range) ' .. sourceCode .. ' end'
-	else
-		if sourceCode:match('^%s*return%s+') then
-			wrapper = 'return function() ' .. sourceCode .. ' end'
-		else
-			wrapper = 'return function() return ' .. sourceCode .. ' end'
-		end
-	end
-
-	local chunk, loadErr = load(wrapper, '=' .. cacheKey, 't', setmetatable({}, {__index = _G}))
-
-	if not chunk then
-		State.distanceExpressionCache[key] = false
-		print(('[poodlechat] Invalid distance expression (%s): %s'):format(cacheKey, tostring(loadErr)))
-		return nil
-	end
-
-	local ok, fn = pcall(chunk)
-
-	if not ok or type(fn) ~= 'function' then
-		State.distanceExpressionCache[key] = false
-		return nil
-	end
-
-	State.distanceExpressionCache[key] = fn
-
-	return fn
-end
-
-local function invokeDistanceGetter(fieldName)
-	if not State.distanceEnabled then
-		return nil
-	end
-
-	local value = distanceConfig[fieldName]
-
-	if type(value) == 'function' then
-		local ok, result = pcall(value)
-		if ok then
-			return result
-		end
-		return nil
-	end
-
-	if type(value) == 'string' then
-		local fn = createDistanceExpressionExecutor('distance_get_' .. fieldName, value, false)
-		if fn then
-			local ok, result = pcall(fn)
-			if ok then
-				return result
-			end
-		end
-	end
-
-	return nil
-end
-
-local function invokeDistanceSetter(range)
-	if not State.distanceEnabled then
-		return false
-	end
-
-	local value = distanceConfig.setDistance
-
-	if type(value) == 'function' then
-		local ok = pcall(value, range)
-		return ok
-	end
-
-	if type(value) == 'string' then
-		local fn = createDistanceExpressionExecutor('distance_set', value, true)
-		if fn then
-			local ok = pcall(fn, range)
-			return ok
-		end
-	end
-
-	return false
-end
-
-local function getDistanceRangesList()
-	local ranges = {}
-	local configuredRanges = distanceConfig.ranges
-
-	if type(configuredRanges) == 'table' then
-		for _, value in ipairs(configuredRanges) do
-			ranges[#ranges + 1] = value
-		end
-	end
-
-	ranges[#ranges + 1] = distanceConfig.default
-
-	if distanceUiConfig.dynamic == true then
-		for value in pairs(State.distanceObservedRanges) do
-			ranges[#ranges + 1] = value
-		end
-	end
-
-	local list = dedupeAndSortRanges(ranges)
-
-	if #list == 0 then
-		list[1] = tonumber(distanceConfig.default) or 10.0
-	end
-
-	return list
-end
-
-local function getClosestRangeIndex(distance, ranges)
-	local index = 1
-	local bestDiff = math.huge
-
-	for i = 1, #ranges do
-		local diff = math.abs(distance - ranges[i])
-		if diff < bestDiff or (diff == bestDiff and ranges[i] > ranges[index]) then
-			bestDiff = diff
-			index = i
-		end
-	end
-
-	return index
-end
-
-local function selectOverrideLevelByRange(distance, levels)
-	local selected = nil
-	local selectedDiff = math.huge
-	local selectedRange = -math.huge
-
-	for i = 1, #levels do
-		local level = levels[i]
-		local levelRange = tonumber(level.range)
-		if levelRange then
-			local diff = math.abs(distance - levelRange)
-			if diff < selectedDiff or (diff == selectedDiff and levelRange > selectedRange) then
-				selected = level
-				selectedDiff = diff
-				selectedRange = levelRange
-			end
-		end
-	end
-
-	return selected
-end
-
-local function selectOverrideLevelByPriority(distance, levels, ranges, modeIndex)
-	local prioritized = {}
-
-	for i = 1, #levels do
-		local level = levels[i]
-		prioritized[#prioritized + 1] = {
-			level = level,
-			priority = tonumber(level.priority) or i
-		}
-	end
-
-	table.sort(prioritized, function(a, b)
-		if a.priority == b.priority then
-			return tostring(a.level.label or '') < tostring(b.level.label or '')
-		end
-		return a.priority < b.priority
-	end)
-
-	local explicitIndex = tonumber(modeIndex)
-	if explicitIndex then
-		explicitIndex = math.floor(explicitIndex + 0.5)
-
-		for i = 1, #prioritized do
-			if prioritized[i].priority == explicitIndex then
-				return prioritized[i].level
-			end
-		end
-
-		return nil
-	end
-
-	local closestRangeIndex = getClosestRangeIndex(distance, ranges)
-	local mappedIndex
-
-	if #ranges <= 1 or #prioritized <= 1 then
-		mappedIndex = 1
-	else
-		mappedIndex = math.floor(((closestRangeIndex - 1) * (#prioritized - 1)) / (#ranges - 1) + 1 + 0.5)
-	end
-
-	mappedIndex = Client.clamp(mappedIndex, 1, #prioritized)
-
-	return prioritized[mappedIndex].level
-end
-
-local function getDistanceOverride(distance, fallbackLabel, modeIndex)
-	if type(distanceUiConfig) ~= 'table' or distanceUiConfig.override ~= true then
-		return fallbackLabel, '#95a5a6'
-	end
-
-	local levels = distanceUiConfig.levels
-
-	if type(levels) ~= 'table' or #levels == 0 then
-		return fallbackLabel, '#95a5a6'
-	end
-
-	local ranges = getDistanceRangesList()
-	local mode = tostring(distanceUiConfig.mode or 'priority'):lower()
-	local selected = nil
-	local explicitModeIndex = tonumber(modeIndex)
-
-	if mode == 'range' then
-		selected = selectOverrideLevelByRange(distance, levels)
-		if not selected then
-			selected = selectOverrideLevelByPriority(distance, levels, ranges, modeIndex)
-		end
-	else
-		selected = selectOverrideLevelByPriority(distance, levels, ranges, modeIndex)
-		if not selected and explicitModeIndex then
-			return fallbackLabel, '#95a5a6'
-		end
-		if not selected then
-			selected = selectOverrideLevelByRange(distance, levels)
-		end
-	end
-
-	if not selected then
-		return fallbackLabel, '#95a5a6'
-	end
-
-	local label = tostring(selected.label or fallbackLabel)
-	local color = normalizeHexColor(selected.color, '#95a5a6')
-
-	return label, color
-end
-
-local function observeDistance(value)
-	if distanceUiConfig.dynamic ~= true then
-		return
-	end
-
-	local rounded = tonumber(string.format('%.3f', value))
-	if rounded then
-		State.distanceObservedRanges[rounded] = true
-	end
-end
-
 local function normalizeModeText(value)
 	if type(value) ~= 'string' then
 		return nil
@@ -368,30 +112,6 @@ local function normalizeModeText(value)
 	end
 
 	return normalized
-end
-
-local function resolveModeIndexFromText(value)
-	local target = normalizeModeText(value)
-	if not target then
-		return nil
-	end
-
-	local levels = type(distanceUiConfig.levels) == 'table' and distanceUiConfig.levels or nil
-	if not levels or #levels == 0 then
-		return nil
-	end
-
-	for i = 1, #levels do
-		local level = levels[i]
-		local priority = tonumber(level.priority) or i
-		local idValue = normalizeModeText(level.id)
-		local labelValue = normalizeModeText(tostring(level.label or ''))
-		if target == idValue or target == labelValue then
-			return math.max(1, math.floor(priority + 0.5))
-		end
-	end
-
-	return nil
 end
 
 local function normalizeModeIndex(rawIndex, modeCount)
@@ -426,8 +146,243 @@ local function normalizeModeIndex(rawIndex, modeCount)
 	return Client.clamp(index, 1, total)
 end
 
-local function createDistancePayload()
+local function hexColorToRgb(value)
+	if type(value) ~= 'string' then
+		return nil
+	end
+
+	local normalized = value:gsub('%s+', '')
+	local rHex, gHex, bHex = normalized:match('^#?(%x%x)(%x%x)(%x%x)$')
+	if not rHex or not gHex or not bHex then
+		return nil
+	end
+
+	local r = tonumber(rHex, 16)
+	local g = tonumber(gHex, 16)
+	local b = tonumber(bHex, 16)
+	if not r or not g or not b then
+		return nil
+	end
+
+	return {r, g, b}
+end
+
+local function rgbToHex(color)
+	local r = Client.clamp(math.floor(tonumber(color[1]) or 0), 0, 255)
+	local g = Client.clamp(math.floor(tonumber(color[2]) or 0), 0, 255)
+	local b = Client.clamp(math.floor(tonumber(color[3]) or 0), 0, 255)
+	return string.format('#%02x%02x%02x', r, g, b)
+end
+
+local function interpolateColor(colorA, colorB, factor)
+	local t = Client.clamp(tonumber(factor) or 0.0, 0.0, 1.0)
+	local r = (colorA[1] or 0) + ((colorB[1] or 0) - (colorA[1] or 0)) * t
+	local g = (colorA[2] or 0) + ((colorB[2] or 0) - (colorA[2] or 0)) * t
+	local b = (colorA[3] or 0) + ((colorB[3] or 0) - (colorA[3] or 0)) * t
+	return {
+		math.floor(r + 0.5),
+		math.floor(g + 0.5),
+		math.floor(b + 0.5)
+	}
+end
+
+local function isVoiceResourceStarted()
+	local resourceName = tostring(constants.voiceResourceName or 'pma-voice')
+	return GetResourceState(resourceName) == 'started'
+end
+
+local function parseVoiceModeEntry(rawEntry, fallbackIndex)
+	if type(rawEntry) ~= 'table' then
+		return nil
+	end
+
+	local range = tonumber(rawEntry[1] or rawEntry.range or rawEntry.distance or rawEntry.value)
+	if not range or range <= 0 then
+		return nil
+	end
+
+	local label = rawEntry[2] or rawEntry.name or rawEntry.label or rawEntry.id
+	if type(label) ~= 'string' or label == '' then
+		label = string.format('%.1f m', range)
+	end
+
+	local index = normalizeModeIndex(rawEntry[3] or rawEntry.index or rawEntry.priority, nil)
+	if not index then
+		index = fallbackIndex
+	end
+
+	return {
+		index = index,
+		label = label,
+		range = range
+	}
+end
+
+local function refreshVoiceModesFromPma()
+	local modes = {}
+
+	if not State.distanceEnabled or not isVoiceResourceStarted() then
+		State.voiceModes = modes
+		State.voiceModeLabels = {}
+		return
+	end
+
+	local captured = nil
+	TriggerEvent('pma-voice:settingsCallback', function(settings)
+		captured = settings
+	end)
+
+	local rawModes = captured and captured.voiceModes
+	if type(rawModes) == 'table' then
+		for i = 1, #rawModes do
+			local parsed = parseVoiceModeEntry(rawModes[i], i)
+			if parsed then
+				modes[#modes + 1] = parsed
+			end
+		end
+	end
+
+	if #modes == 0 then
+		local proximity = getLocalProximityState()
+		local distance = proximity and tonumber(proximity.distance) or nil
+		if distance and distance > 0 then
+			local label = tostring(proximity.mode or string.format('%.1f m', distance))
+			modes[1] = {
+				index = 1,
+				label = label,
+				range = distance
+			}
+		end
+	end
+
+	table.sort(modes, function(a, b)
+		return (tonumber(a.index) or 0) < (tonumber(b.index) or 0)
+	end)
+
+	State.voiceModes = modes
+	State.voiceModeLabels = {}
+	for i = 1, #modes do
+		State.voiceModeLabels[i] = tostring(modes[i].label or ('Mode ' .. i))
+	end
+end
+
+local function buildVoiceColorAnchors()
+	local anchors = {}
+	local minColor = normalizeHexColor(tostring(constants.voiceColorMin or '#2e85cc'), '#2e85cc')
+	local maxColor = normalizeHexColor(tostring(constants.voiceColorMax or '#e74c3c'), '#e74c3c')
+	anchors[#anchors + 1] = hexColorToRgb(minColor) or {46, 133, 204}
+
+	local intermediate = type(constants.voiceColorIntermediate) == 'table' and constants.voiceColorIntermediate or {}
+	for i = 1, #intermediate do
+		local parsed = hexColorToRgb(normalizeHexColor(tostring(intermediate[i]), '#ffffff'))
+		if parsed then
+			anchors[#anchors + 1] = parsed
+		end
+	end
+
+	anchors[#anchors + 1] = hexColorToRgb(maxColor) or {231, 76, 60}
+	return anchors
+end
+
+local function buildVoiceLevelColors(levelCount)
+	local total = math.max(1, math.floor(tonumber(levelCount) or 1))
+	local anchors = buildVoiceColorAnchors()
+	local colors = {}
+	local anchorCount = #anchors
+
+	if anchorCount == 1 then
+		for i = 1, total do
+			colors[i] = rgbToHex(anchors[1])
+		end
+		return colors
+	end
+
+	if total <= anchorCount then
+		for i = 1, total do
+			local anchorIndex = 1
+			if total > 1 then
+				local target = ((i - 1) / (total - 1)) * (anchorCount - 1)
+				anchorIndex = math.floor(target + 0.5) + 1
+			end
+			anchorIndex = Client.clamp(anchorIndex, 1, anchorCount)
+			colors[i] = rgbToHex(anchors[anchorIndex])
+		end
+	else
+		for i = 1, total do
+			local t
+			if total == 1 then
+				t = 0.0
+			else
+				t = (i - 1) / (total - 1)
+			end
+
+			local scaled = t * (anchorCount - 1)
+			local leftIndex = math.floor(scaled) + 1
+			local rightIndex = math.min(anchorCount, leftIndex + 1)
+			local localT = scaled - math.floor(scaled)
+			colors[i] = rgbToHex(interpolateColor(anchors[leftIndex], anchors[rightIndex], localT))
+		end
+	end
+
+	if anchorCount == 3 and total % 2 == 1 then
+		local middleIndex = math.floor((total + 1) / 2)
+		colors[middleIndex] = rgbToHex(anchors[2])
+	end
+
+	return colors
+end
+
+local function getDistanceRangesList()
+	local ranges = {}
+	for i = 1, #State.voiceModes do
+		local modeRange = tonumber(State.voiceModes[i].range)
+		if modeRange and modeRange > 0 then
+			ranges[#ranges + 1] = modeRange
+		end
+	end
+
+	local sorted = dedupeAndSortRanges(ranges)
+	if #sorted == 0 then
+		local fallback = tonumber(constants.voiceFallbackLocalDistance) or tonumber(State.LocalMessageDistance) or 10.0
+		sorted[1] = fallback
+	end
+	return sorted
+end
+
+local function refreshVoiceAvailability(announceMissing)
 	if not State.distanceEnabled then
+		State.voiceAvailable = false
+		State.voiceModes = {}
+		State.voiceModeLabels = {}
+		State.voiceLevelColors = {}
+		State.distanceModeCount = nil
+		refreshDistanceState(true)
+		return
+	end
+
+	State.voiceAvailable = isVoiceResourceStarted()
+	if not State.voiceAvailable then
+		State.voiceModes = {}
+		State.voiceModeLabels = {}
+		State.voiceLevelColors = {}
+		State.distanceModeCount = nil
+		if announceMissing and not State.voiceErrorShown then
+			State.voiceErrorShown = true
+			Client.addChatMessage({255, 128, 128}, 'System', ('Voice resource "%s" is not running'):format(tostring(constants.voiceResourceName or 'pma-voice')))
+		end
+		refreshDistanceState(true)
+		return
+	end
+
+	State.voiceErrorShown = false
+	refreshVoiceModesFromPma()
+	State.distanceModeCount = math.max(1, #State.voiceModes)
+	State.voiceLevelColors = buildVoiceLevelColors(State.distanceModeCount)
+	refreshDistanceState(true)
+end
+
+local function createDistancePayload()
+	if not State.distanceEnabled or State.voiceAvailable ~= true then
 		return {
 			enabled = false
 		}
@@ -435,84 +390,35 @@ local function createDistancePayload()
 
 	local proximityState = getLocalProximityState()
 	local proximityDistance = proximityState and tonumber(proximityState.distance) or nil
-	local proximityMode = proximityState and proximityState.mode or nil
-	local proximityIndex = proximityState and proximityState.index or nil
-
-	local defaultDistance = tonumber(distanceConfig.default) or 10.0
-	local rawDistance = invokeDistanceGetter('getDistance')
-	local distance = tonumber(rawDistance) or proximityDistance or defaultDistance
-
-	observeDistance(distance)
-
-	local rawLabel = invokeDistanceGetter('getLabel')
-	local fallbackLabel
-
-	if type(rawLabel) == 'string' and rawLabel ~= '' then
-		fallbackLabel = rawLabel
-	elseif tonumber(rawLabel) then
-		fallbackLabel = tostring(rawLabel)
-	elseif type(proximityMode) == 'string' and proximityMode ~= '' then
-		fallbackLabel = proximityMode
-	else
-		fallbackLabel = string.format('%.1f m', distance)
+	local proximityMode = tostring(proximityState and proximityState.mode or '')
+	local modeCount = tonumber(State.distanceModeCount) or 1
+	local modeIndex = normalizeModeIndex(proximityState and proximityState.index or nil, modeCount)
+	if not modeIndex then
+		modeIndex = 1
 	end
 
-	local label, color = getDistanceOverride(distance, fallbackLabel, proximityIndex)
+	local fallbackDistance = tonumber(constants.voiceFallbackLocalDistance) or tonumber(State.LocalMessageDistance) or 10.0
+	local distance = proximityDistance or fallbackDistance
+	local label = proximityMode ~= '' and proximityMode or tostring(State.voiceModeLabels[modeIndex] or string.format('%.1f m', distance))
+	local color = normalizeHexColor(State.voiceLevelColors[modeIndex], '#95a5a6')
 	local ranges = getDistanceRangesList()
 
-	local percent = nil
-	local modeCount = tonumber(State.distanceModeCount)
-
-	if not modeCount or modeCount <= 1 then
-		if type(distanceUiConfig.levels) == 'table' and #distanceUiConfig.levels > 1 then
-			modeCount = #distanceUiConfig.levels
-		elseif #ranges > 1 then
-			modeCount = #ranges
-		end
-	end
-
-	local modeIndex = normalizeModeIndex(proximityIndex, modeCount)
-	local inferredModeIndex = resolveModeIndexFromText(proximityMode) or resolveModeIndexFromText(rawLabel) or resolveModeIndexFromText(label)
-	if inferredModeIndex then
-		if modeCount and modeCount > 0 then
-			modeIndex = Client.clamp(inferredModeIndex, 1, modeCount)
-		else
-			modeIndex = inferredModeIndex
-		end
-	end
-	local modePercent = nil
-
-	if #ranges > 1 then
+	local percent
+	if modeCount > 1 then
+		percent = math.floor(Client.clamp((modeIndex - 1) / (modeCount - 1), 0.0, 1.0) * 100 + 0.5)
+	elseif #ranges > 1 then
 		local minRange = ranges[1]
 		local maxRange = ranges[#ranges]
-
 		if maxRange > minRange then
 			percent = math.floor(Client.clamp((distance - minRange) / (maxRange - minRange), 0.0, 1.0) * 100 + 0.5)
-		end
-	end
-
-	if modeIndex and modeCount and modeCount > 1 then
-		modePercent = math.floor(Client.clamp((modeIndex - 1) / (modeCount - 1), 0.0, 1.0) * 100 + 0.5)
-	elseif modeIndex and modeCount and modeCount == 1 then
-		modePercent = 100
-	end
-
-	if modePercent ~= nil then
-		if percent == nil then
-			percent = modePercent
 		else
-			percent = math.max(percent, modePercent)
-		end
-	end
-
-	if percent == nil then
-		if #ranges == 1 then
 			percent = 100
-		else
-			percent = 0
 		end
+	else
+		percent = 100
 	end
 
+	percent = percent or 0
 	if percent >= 99 then
 		percent = 100
 	end
@@ -574,7 +480,7 @@ local function isSameDistancePayload(a, b)
 	return true
 end
 
-local function refreshDistanceState(force)
+refreshDistanceState = function(force)
 	local payload = createDistancePayload()
 
 	State.distanceState = payload
@@ -589,69 +495,58 @@ local function refreshDistanceState(force)
 end
 
 local function refreshDistanceModeCount()
-	if not State.distanceEnabled then
+	if not State.distanceEnabled or State.voiceAvailable ~= true then
 		return
 	end
 
-	local configuredLevels = type(distanceUiConfig.levels) == 'table' and #distanceUiConfig.levels or 0
-	if configuredLevels > 0 then
-		State.distanceModeCount = configuredLevels
-	else
-		State.distanceModeCount = math.max(1, #getDistanceRangesList())
-	end
-
-	local proximityState = getLocalProximityState()
-	local proximityIndex = proximityState and tonumber(proximityState.index) or nil
-	if proximityIndex and proximityIndex > State.distanceModeCount and configuredLevels <= 0 then
-		State.distanceModeCount = math.floor(proximityIndex + 0.5)
-	end
-
+	refreshVoiceModesFromPma()
+	State.distanceModeCount = math.max(1, #State.voiceModes)
+	State.voiceLevelColors = buildVoiceLevelColors(State.distanceModeCount)
 	refreshDistanceState(true)
 end
 
-local function invokeDistanceCycleFallback()
-	if GetResourceState('pma-voice') ~= 'started' then
+local function cycleDistance()
+	if not State.distanceEnabled or State.voiceAvailable ~= true then
 		return false
 	end
 
 	local ok = pcall(ExecuteCommand, 'cycleproximity')
+	if ok then
+		Wait(0)
+		refreshDistanceModeCount()
+		refreshDistanceState(true)
+	end
+
 	return ok
 end
 
-local function cycleDistance()
-	if not State.distanceEnabled then
+hasAnyUnmutedNotificationTab = function()
+	if type(constants.channelList) ~= 'table' then
 		return false
 	end
 
-	local ranges = getDistanceRangesList()
-	local currentDistance = tonumber(State.distanceState.value) or tonumber(distanceConfig.default) or ranges[1]
-	local nextRange = ranges[1]
-
-	for i = 1, #ranges do
-		if ranges[i] > currentDistance + 0.01 then
-			nextRange = ranges[i]
-			break
+	for i = 1, #constants.channelList do
+		local channel = constants.channelList[i]
+		local channelId = channel and channel.id
+		if channelId and Client.canAccessChannel(channelId) and channel.visible ~= false and isTabSoundEnabled(channelId) then
+			return true
 		end
 	end
 
-	local ok = invokeDistanceSetter(nextRange)
-	local usedFallback = false
+	return false
+end
 
-	if not ok then
-		ok = invokeDistanceCycleFallback()
-		usedFallback = ok
-	end
-
-	if ok and not usedFallback then
-		observeDistance(nextRange)
-	end
-
-	refreshDistanceState(true)
-
-	return ok
+getNotificationToggleState = function()
+	local hasUnmutedTabs = hasAnyUnmutedNotificationTab()
+	return {
+		allowToggle = State.whisperSoundToggleAllowed == true and hasUnmutedTabs,
+		active = State.whisperSoundEnabled == true and hasUnmutedTabs,
+		mode = hasUnmutedTabs and (State.whisperSoundEnabled == true and 'on' or 'off') or 'allMuted'
+	}
 end
 
 local function getFeatureStatePayload()
+	local notificationState = getNotificationToggleState()
 	return {
 		typing = {
 			enabled = State.typingSystemEnabled,
@@ -670,12 +565,13 @@ local function getFeatureStatePayload()
 		},
 		whisperSound = {
 			enabled = true,
-			allowToggle = State.whisperSoundToggleAllowed == true,
-			active = State.whisperSoundEnabled == true,
+			allowToggle = notificationState.allowToggle,
+			active = notificationState.active,
+			mode = notificationState.mode,
 			volume = tonumber(constants.whisperNotificationVolume) or 0.65
 		},
 		distance = {
-			enabled = State.distanceEnabled
+			enabled = State.distanceEnabled and State.voiceAvailable == true
 		}
 	}
 end
@@ -1042,6 +938,7 @@ local function setWhisperSoundEnabled(nextState)
 	end
 
 	State.whisperSoundEnabled = nextState == true
+	SetResourceKvp('poodlechat:notificationSound:v1', State.whisperSoundEnabled and 'true' or 'false')
 	SetResourceKvp('whisperSoundEnabled', State.whisperSoundEnabled and 'true' or 'false')
 	sendFeatureState()
 
@@ -1050,12 +947,18 @@ end
 
 local function toggleWhisperSound()
 	if State.whisperSoundToggleAllowed ~= true then
-		Client.addChatMessage({255, 0, 0}, 'Error', 'Whisper sound cannot be toggled')
+		Client.addChatMessage({255, 0, 0}, 'Error', 'Notification sound cannot be toggled')
+		return State.whisperSoundEnabled
+	end
+
+	if not hasAnyUnmutedNotificationTab() then
+		Client.addChatMessage({255, 165, 0}, 'Notification sound', 'all tabs are muted')
+		sendFeatureState()
 		return State.whisperSoundEnabled
 	end
 
 	local value = setWhisperSoundEnabled(not State.whisperSoundEnabled)
-	Client.addChatMessage({255, 255, 128}, 'Whisper sound', value and 'on' or 'off')
+	Client.addChatMessage({255, 255, 128}, 'Notification sound', value and 'on' or 'off')
 	return value
 end
 
@@ -1082,15 +985,48 @@ local function toggleAutoScroll()
 	return value
 end
 
-local function playWhisperSound()
+local function resolveNotificationProfile(channelId)
+	local normalized = Client.normalizeKey(channelId) or ''
+	local byChannel = type(constants.notificationByChannel) == 'table' and constants.notificationByChannel or {}
+	local profile = byChannel[normalized]
+	if type(profile) == 'table' then
+		return profile
+	end
+	return type(constants.notificationDefaultProfile) == 'table' and constants.notificationDefaultProfile or {}
+end
+
+isTabSoundEnabled = function(channelId)
+	local normalized = Client.normalizeKey(channelId) or ''
+	if normalized == '' then
+		return true
+	end
+
+	local toggles = State.TabNotificationToggles
+	if type(toggles) == 'table' and toggles[normalized] ~= nil then
+		return toggles[normalized] == true
+	end
+
+	local profile = resolveNotificationProfile(normalized)
+	return type(profile) ~= 'table' or profile.enabled ~= false
+end
+
+local function playTabNotificationSound(channelId)
 	if State.whisperSoundEnabled ~= true then
 		return false
 	end
 
-	local soundName = tostring(constants.whisperNotificationSoundName or 'TENNIS_POINT_WON')
-	local soundSet = tostring(constants.whisperNotificationSoundSet or 'HUD_AWARDS')
-	local fallbackName = tostring(constants.whisperNotificationFallbackSoundName or 'SELECT')
-	local fallbackSet = tostring(constants.whisperNotificationFallbackSoundSet or 'HUD_FRONTEND_DEFAULT_SOUNDSET')
+	local normalized = Client.normalizeKey(channelId) or 'whispers'
+	if not isTabSoundEnabled(normalized) then
+		return false
+	end
+
+	local profile = resolveNotificationProfile(normalized)
+	local sound = type(profile.sound) == 'table' and profile.sound or {}
+	local fallbackSound = type(profile.fallbackSound) == 'table' and profile.fallbackSound or {}
+	local soundName = tostring(sound.name or constants.whisperNotificationSoundName or 'SELECT')
+	local soundSet = tostring(sound.set or constants.whisperNotificationSoundSet or 'HUD_FRONTEND_DEFAULT_SOUNDSET')
+	local fallbackName = tostring(fallbackSound.name or constants.whisperNotificationFallbackSoundName or 'SELECT')
+	local fallbackSet = tostring(fallbackSound.set or constants.whisperNotificationFallbackSoundSet or 'HUD_FRONTEND_DEFAULT_SOUNDSET')
 
 	if soundName == '' or soundSet == '' then
 		pcall(PlaySoundFrontend, -1, fallbackName, fallbackSet, true)
@@ -1102,6 +1038,10 @@ local function playWhisperSound()
 		pcall(PlaySoundFrontend, -1, fallbackName, fallbackSet, true)
 	end
 	return true
+end
+
+local function playWhisperSound()
+	return playTabNotificationSound('whispers')
 end
 
 local function registerFeatureHandlers()
@@ -1184,18 +1124,65 @@ local function registerFeatureHandlers()
 	end)
 
 	if State.distanceEnabled then
-		CreateThread(function()
-			local pollRate = math.max(100, tonumber(distanceConfig.pollRate) or 500)
+		refreshVoiceAvailability(true)
 
+		CreateThread(function()
+			local pollRate = math.max(100, tonumber(constants.voicePollRate) or 250)
+			local modeRefreshEvery = math.max(1000, pollRate * 8)
+			local nextModeRefreshAt = 0
 			while true do
 				Wait(pollRate)
-				refreshDistanceState(false)
+				if State.voiceAvailable == true then
+					local now = GetGameTimer()
+					if now >= nextModeRefreshAt then
+						refreshDistanceModeCount()
+						nextModeRefreshAt = now + modeRefreshEvery
+					else
+						refreshDistanceState(false)
+					end
+				end
 			end
 		end)
 	end
 
+	AddEventHandler('onClientResourceStart', function(resName)
+		if not State.distanceEnabled then
+			return
+		end
+
+		local target = normalizeModeText(resName)
+		local configured = normalizeModeText(constants.voiceResourceName or 'pma-voice')
+		if target ~= configured then
+			return
+		end
+
+		Wait(constants.pmaStartDelayMs or 0)
+		refreshVoiceAvailability(false)
+		sendFeatureState()
+	end)
+
+	AddEventHandler('onClientResourceStop', function(resName)
+		if not State.distanceEnabled then
+			return
+		end
+
+		local target = normalizeModeText(resName)
+		local configured = normalizeModeText(constants.voiceResourceName or 'pma-voice')
+		if target ~= configured then
+			return
+		end
+
+		State.voiceAvailable = false
+		State.voiceModes = {}
+		State.voiceModeLabels = {}
+		State.voiceLevelColors = {}
+		State.distanceModeCount = nil
+		refreshDistanceState(true)
+		sendFeatureState()
+	end)
+
 	AddEventHandler('pma-voice:setTalkingMode', function()
-		if State.distanceEnabled then
+		if State.distanceEnabled and State.voiceAvailable == true then
 			refreshDistanceModeCount()
 			refreshDistanceState(true)
 		end
@@ -1203,12 +1190,16 @@ local function registerFeatureHandlers()
 
 	if State.distanceEnabled and type(AddStateBagChangeHandler) == 'function' then
 		AddStateBagChangeHandler('proximity', nil, function(bagName)
+			if State.voiceAvailable ~= true then
+				return
+			end
+
 			local localBag = 'player:' .. tostring(GetPlayerServerId(PlayerId()))
 			if bagName ~= localBag then
 				return
 			end
 
-			refreshDistanceState(true)
+			refreshDistanceModeCount()
 		end)
 	end
 
@@ -1229,9 +1220,11 @@ Client.toggleBubbleDisplay = toggleBubbleDisplay
 Client.toggleWhisperSound = toggleWhisperSound
 Client.toggleAutoScroll = toggleAutoScroll
 Client.playWhisperSound = playWhisperSound
+Client.playTabNotificationSound = playTabNotificationSound
 Client.setWhisperSoundEnabled = setWhisperSoundEnabled
 Client.setAutoScrollEnabled = setAutoScrollEnabled
 Client.setTypingDisplayEnabled = setTypingDisplayEnabled
 Client.setBubbleDisplayEnabled = setBubbleDisplayEnabled
+Client.refreshVoiceAvailability = refreshVoiceAvailability
 Client.registerFeatureHandlers = registerFeatureHandlers
 

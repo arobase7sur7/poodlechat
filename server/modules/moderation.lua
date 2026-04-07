@@ -146,6 +146,17 @@ local function registerModerationHandlers()
 	AddEventHandler('playerJoining', function()
 		Server.clearIdentifierCache(source)
 
+		if Server.sendRawChannelMessage then
+			Server.sendRawChannelMessage(nil, constants.DefaultChannelId, {
+				label = 'System',
+				color = {255, 255, 255},
+				args = {'^2* ' .. Server.getName(source) .. '^r^2 joined.'},
+				metadata = {
+					type = 'join'
+				}
+			})
+		end
+
 		if Server.isDiscordKindEnabled('join') then
 			Server.sendDiscordWebhook('join', source, Server.getName(source), 'connected to the server.', nil)
 		end
@@ -160,7 +171,16 @@ local function registerModerationHandlers()
 			leaveColor = Server.getDiscordColor('leaveKicked', 16007897)
 		end
 
-		TriggerClientEvent('chatMessage', -1, '', {255, 255, 255}, '^2* ' .. playerName .. '^r^2 left (' .. leaveReason .. ')')
+		if Server.sendRawChannelMessage then
+			Server.sendRawChannelMessage(nil, constants.DefaultChannelId, {
+				label = 'System',
+				color = {255, 255, 255},
+				args = {'^2* ' .. playerName .. '^r^2 left (' .. leaveReason .. ')'},
+				metadata = {
+					type = 'leave'
+				}
+			})
+		end
 		TriggerClientEvent('poodlechat:typingState', -1, source, false)
 		Server.state.typingStateBySource[source] = nil
 

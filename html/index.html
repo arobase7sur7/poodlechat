@@ -142,6 +142,17 @@
                 </div>
                 <div v-if="separateChannelTabs && visibleChannels.length > 1" class="tab" id="cycle-instructions">Tab</div>
                 <div class="tab" id="emoji-toggle">&#128512;</div>
+                <div class="tab" id="grouping-toggle" @click="toggleGroupingEditor" title="Tab groups">
+                  <span class="btn-icon" aria-hidden="true">
+                    <svg class="tool-svg" viewBox="0 0 24 24" focusable="false">
+                      <circle cx="7" cy="7" r="2"></circle>
+                      <circle cx="17" cy="12" r="2"></circle>
+                      <circle cx="7" cy="17" r="2"></circle>
+                      <path d="M9 8l6 3"></path>
+                      <path d="M9 16l6-3"></path>
+                    </svg>
+                  </span>
+                </div>
               </div>
               <div class="control-rail">
                 <button class="tool-btn icon-btn no-focus" id="distance-widget" type="button" tabindex="-1" title="Cycle distance">
@@ -185,13 +196,27 @@
                     </svg>
                   </span>
                 </button>
-                <button class="tool-btn icon-btn no-focus" id="whisper-sound-toggle" type="button" tabindex="-1" title="Toggle whisper sound">
+                <button class="tool-btn icon-btn no-focus" id="whisper-sound-toggle" type="button" tabindex="-1" title="Toggle notification sound">
                   <span class="btn-icon" aria-hidden="true">
                     <svg class="tool-svg" viewBox="0 0 24 24" focusable="false">
                       <path d="M14 5L9.5 9H6v6h3.5l4.5 4z"></path>
                       <path d="M17 9.5a3.5 3.5 0 0 1 0 5"></path>
                     </svg>
                   </span>
+                </button>
+              </div>
+            </div>
+            <div v-if="groupingEditorOpen" class="grouping-editor no-focus" tabindex="-1">
+              <div class="grouping-row" v-for="channel in visibleChannels" :key="'grouping-' + channel.id">
+                <div class="grouping-channel">{{ channel.label }}</div>
+                <div class="grouping-target">
+                  <span class="grouping-target-prefix">Send in tab:</span>
+                  <select class="grouping-select no-focus" :value="groupingSelectionValue(channel.id)" @change="setChannelGroup(channel.id, $event.target.value)" tabindex="-1">
+                    <option v-for="target in visibleChannels" :key="'grouping-option-' + channel.id + '-' + target.id" :value="target.id">{{ target.label }}</option>
+                  </select>
+                </div>
+                <button type="button" class="grouping-sound-btn no-focus" :class="{ muted: !isTabSoundEnabled(channel.id) }" @click="toggleTabSound(channel.id)" tabindex="-1">
+                  {{ isTabSoundEnabled(channel.id) ? 'SOUND' : 'MUTED' }}
                 </button>
               </div>
             </div>

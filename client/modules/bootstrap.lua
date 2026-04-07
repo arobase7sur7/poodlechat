@@ -43,6 +43,7 @@ local legacyCommandAliases = {
 	toggleoverhead = {'toggleoverhead'},
 	toggletyping = {'toggletyping'},
 	togglebubbles = {'togglebubbles'},
+	togglesound = {'togglesound', 'sound'},
 	report = {'report'},
 	mute = {'mute'},
 	unmute = {'unmute'},
@@ -154,6 +155,54 @@ local function normalizeRgbColor(value, fallback)
 	end
 
 	return {255, 255, 255}
+end
+
+local function collectVoiceIntermediateColors(raw)
+	local result = {}
+
+	local function appendColor(value)
+		if value == nil then
+			return
+		end
+		local color = tostring(value):gsub('%s+', '')
+		if color ~= '' then
+			result[#result + 1] = color
+		end
+	end
+
+	local direct = raw.intermediate
+	if type(direct) == 'table' then
+		for i = 1, #direct do
+			appendColor(direct[i])
+		end
+	elseif direct ~= nil then
+		appendColor(direct)
+	end
+
+	local indexed = {}
+	for key, value in pairs(raw) do
+		local keyName = normalizeKey(tostring(key))
+		local numericKey = keyName and keyName:match('^intermediate[_%-]?(%d+)$') or nil
+		if numericKey then
+			indexed[#indexed + 1] = {
+				index = tonumber(numericKey) or 0,
+				value = value
+			}
+		end
+	end
+
+	table.sort(indexed, function(a, b)
+		if a.index == b.index then
+			return tostring(a.value or '') < tostring(b.value or '')
+		end
+		return a.index < b.index
+	end)
+
+	for i = 1, #indexed do
+		appendColor(indexed[i].value)
+	end
+
+	return result
 end
 
 local function addChatMessage(color, ...)
@@ -583,6 +632,82 @@ local function canSendToChannel(channelId)
 	return channel.canSend ~= false
 end
 
+local function normalizeDefaultTabGrouping(rawGroups, channelList, channelById)
+	local result = {}
+	local seen = {}
+	local nextGroupId = 1
+
+	if type(rawGroups) == 'table' then
+		for i = 1, #rawGroups do
+			local rawGroup = rawGroups[i]
+			if type(rawGroup) == 'table' then
+				local groupMembers = {}
+				for j = 1, #rawGroup do
+					local channelId = normalizeKey(rawGroup[j])
+					if channelId and channelById[channelId] and not seen[channelId] then
+						groupMembers[#groupMembers + 1] = channelId
+						seen[channelId] = true
+					end
+				end
+
+				if #groupMembers > 0 then
+					for j = 1, #groupMembers do
+						result[groupMembers[j]] = nextGroupId
+					end
+					nextGroupId = nextGroupId + 1
+				end
+			end
+		end
+	end
+
+	for i = 1, #channelList do
+		local channelId = channelList[i].id
+		if not result[channelId] then
+			result[channelId] = nextGroupId
+			nextGroupId = nextGroupId + 1
+		end
+	end
+
+	return result
+end
+
+local function normalizeNotificationProfile(rawValue, fallback)
+	local base = type(fallback) == 'table' and fallback or {}
+	local entry = type(rawValue) == 'table' and rawValue or {}
+	local soundEntry = type(entry.sound) == 'table' and entry.sound or {}
+	local fallbackSoundEntry = type(entry.fallbackSound) == 'table' and entry.fallbackSound or {}
+	local baseSound = type(base.sound) == 'table' and base.sound or {}
+	local baseFallbackSound = type(base.fallbackSound) == 'table' and base.fallbackSound or {}
+
+	local volume = tonumber(entry.volume)
+	if volume == nil then
+		volume = tonumber(base.volume)
+	end
+	if volume == nil then
+		volume = 0.65
+	end
+
+	local enabled
+	if entry.enabled == nil then
+		enabled = base.enabled ~= false
+	else
+		enabled = entry.enabled ~= false
+	end
+
+	return {
+		enabled = enabled,
+		volume = clamp(volume, 0.0, 1.0),
+		sound = {
+			name = tostring(soundEntry.name or baseSound.name or 'SELECT'),
+			set = tostring(soundEntry.set or baseSound.set or 'HUD_FRONTEND_DEFAULT_SOUNDSET')
+		},
+		fallbackSound = {
+			name = tostring(fallbackSoundEntry.name or baseFallbackSound.name or 'SELECT'),
+			set = tostring(fallbackSoundEntry.set or baseFallbackSound.set or 'HUD_FRONTEND_DEFAULT_SOUNDSET')
+		}
+	}
+end
+
 local function setupBootstrap()
 	if bootstrapInitialized then
 		return
@@ -596,8 +721,8 @@ local function setupBootstrap()
 	local featureConfig = type(rootConfig.features) == 'table' and rootConfig.features or {}
 	local rawTypingConfig = type(featureConfig.typing) == 'table' and featureConfig.typing or {}
 	local rawBubbleConfig = type(featureConfig.bubbles) == 'table' and featureConfig.bubbles or {}
-	local rawDistanceConfig = type(rootConfig.distance) == 'table' and rootConfig.distance or {}
-	local distanceUiRoot = type(rawDistanceConfig.ui) == 'table' and rawDistanceConfig.ui or {}
+	local voiceConfig = type(rootConfig.voice) == 'table' and rootConfig.voice or {}
+	local voiceColorConfig = type(voiceConfig.colors) == 'table' and voiceConfig.colors or {}
 	local runtimeConfig = type(rootConfig.runtime) == 'table' and rootConfig.runtime or {}
 	local clientRuntime = type(runtimeConfig.client) == 'table' and runtimeConfig.client or {}
 	local accessConfig = type(rootConfig.access) == 'table' and rootConfig.access or {}
@@ -605,6 +730,8 @@ local function setupBootstrap()
 	local commandsConfig = type(rootConfig.commands) == 'table' and rootConfig.commands or {}
 	local routingConfig = type(rootConfig.routing) == 'table' and rootConfig.routing or {}
 	local whispersConfig = type(rootConfig.whispers) == 'table' and rootConfig.whispers or {}
+	local tabsConfig = type(rootConfig.tabs) == 'table' and rootConfig.tabs or {}
+	local notificationsConfig = type(rootConfig.notifications) == 'table' and rootConfig.notifications or {}
 	local messagesConfig = type(rootConfig.messages) == 'table' and rootConfig.messages or {}
 	local actionMessageConfig = type(messagesConfig.action) == 'table' and messagesConfig.action or {}
 
@@ -637,42 +764,6 @@ local function setupBootstrap()
 		offset = rawBubbleConfig.offset
 	}
 
-	local modeLevels = {}
-	local modeRanges = {}
-	local configuredModes = type(rawDistanceConfig.modes) == 'table' and rawDistanceConfig.modes or {}
-	for i = 1, #configuredModes do
-		local mode = configuredModes[i]
-		local distanceValue = tonumber(mode.distance)
-		if distanceValue and distanceValue > 0 then
-			modeRanges[#modeRanges + 1] = distanceValue
-			modeLevels[#modeLevels + 1] = {
-				id = normalizeKey(mode.id) or tostring(mode.id or ''),
-				priority = i,
-				label = tostring(mode.label or mode.id or ('Mode ' .. i)),
-				color = tostring(mode.color or '#95a5a6'),
-				range = distanceValue
-			}
-		end
-	end
-
-	local distanceConfig = {
-		enabled = rawDistanceConfig.enabled == true,
-		default = tonumber(rawDistanceConfig.default) or 10.0,
-		pollRate = tonumber(rawDistanceConfig.pollRate) or 500,
-		getDistance = rawDistanceConfig.getCurrent,
-		getLabel = rawDistanceConfig.getLabel,
-		setDistance = rawDistanceConfig.setCurrent,
-		ranges = modeRanges,
-		ui = {
-			override = distanceUiRoot.useModeLabels ~= false,
-			mode = 'priority',
-			dynamic = distanceUiRoot.dynamic == true,
-			levels = modeLevels
-		}
-	}
-
-	local distanceUiConfig = distanceConfig.ui
-
 	local channelList, channelById, channelIdByName, channelNameById = buildChannelDefinitions(channelsConfig, accessConfig.staffChannelAce)
 	local keepLegacyAliases = routingConfig.keepLegacyAliases == true
 	local commandByKey = buildCommandDefinitions(commandsConfig, keepLegacyAliases)
@@ -689,11 +780,8 @@ local function setupBootstrap()
 		end
 	end
 
-	local separateChannelTabs = uiConfig.separateChannelTabs ~= false
-	local singleChannelId = normalizeKey(uiConfig.singleChannelId) or 'local'
-	if not channelById[singleChannelId] then
-		singleChannelId = defaultChannelId
-	end
+	local separateChannelTabs = true
+	local singleChannelId = defaultChannelId
 
 	local whisperTabEnabled = whispersConfig.tabEnabled ~= false
 	local whisperFallbackChannelId = normalizeKey(whispersConfig.fallbackChannel) or defaultChannelId
@@ -711,16 +799,6 @@ local function setupBootstrap()
 
 	if not whisperTabEnabled and defaultChannelId == 'whispers' then
 		defaultChannelId = whisperFallbackChannelId
-	end
-
-	if not separateChannelTabs then
-		if singleChannelId == 'whispers' and not whisperTabEnabled then
-			singleChannelId = whisperFallbackChannelId
-		end
-		if not channelById[singleChannelId] then
-			singleChannelId = defaultChannelId
-		end
-		defaultChannelId = singleChannelId
 	end
 
 	for _, command in pairs(commandByKey) do
@@ -745,10 +823,51 @@ local function setupBootstrap()
 	end
 	local commandResponseWindowMs = math.max(100, tonumber(routingConfig.responseWindowMs) or 1500)
 
-	local whisperNotification = type(whispersConfig.notification) == 'table' and whispersConfig.notification or {}
-	local whisperSoundConfig = type(whisperNotification.sound) == 'table' and whisperNotification.sound or {}
-	local whisperFallbackSoundConfig = type(whisperNotification.fallbackSound) == 'table' and whisperNotification.fallbackSound or {}
 	local whisperSidebar = type(whispersConfig.sidebar) == 'table' and whispersConfig.sidebar or {}
+	local whisperLegacyNotification = type(whispersConfig.notification) == 'table' and whispersConfig.notification or {}
+
+	local notificationDefaultRaw = type(notificationsConfig.default) == 'table' and notificationsConfig.default or {}
+	local legacyWhisperSound = type(whisperLegacyNotification.sound) == 'table' and whisperLegacyNotification.sound or {}
+	local legacyWhisperFallbackSound = type(whisperLegacyNotification.fallbackSound) == 'table' and whisperLegacyNotification.fallbackSound or {}
+	local notificationDefaultProfile = normalizeNotificationProfile(notificationDefaultRaw, {
+		enabled = true,
+		volume = tonumber(whisperLegacyNotification.volume) or 0.65,
+		sound = {
+			name = tostring(legacyWhisperSound.name or 'SELECT'),
+			set = tostring(legacyWhisperSound.set or 'HUD_FRONTEND_DEFAULT_SOUNDSET')
+		},
+		fallbackSound = {
+			name = tostring(legacyWhisperFallbackSound.name or 'SELECT'),
+			set = tostring(legacyWhisperFallbackSound.set or 'HUD_FRONTEND_DEFAULT_SOUNDSET')
+		}
+	})
+
+	local notificationByChannel = {}
+	local notificationTabs = type(notificationsConfig.tabs) == 'table' and notificationsConfig.tabs or {}
+	for i = 1, #channelList do
+		local channelId = channelList[i].id
+		local profile = notificationTabs[channelId]
+		if profile == nil and channelId == 'whispers' and whisperLegacyNotification.enabled ~= nil then
+			profile = whisperLegacyNotification
+		end
+		notificationByChannel[channelId] = normalizeNotificationProfile(profile, notificationDefaultProfile)
+	end
+
+	local whisperNotificationProfile = notificationByChannel.whispers or notificationDefaultProfile
+
+	local defaultTabGrouping = normalizeDefaultTabGrouping(tabsConfig.defaultGroups, channelList, channelById)
+	local defaultTabGroupingState = {}
+	for channelId, groupId in pairs(defaultTabGrouping) do
+		defaultTabGroupingState[channelId] = groupId
+	end
+
+	local voiceResourceName = normalizeKey(tostring(voiceConfig.resource or 'pma-voice')) or 'pma-voice'
+	local voiceFallbackLocalDistance = tonumber(voiceConfig.fallbackLocalDistance)
+	if not voiceFallbackLocalDistance or voiceFallbackLocalDistance <= 0 then
+		voiceFallbackLocalDistance = tonumber(((channelsConfig["local"] or {}).distance)) or 50.0
+	end
+
+	local voiceIntermediateColors = collectVoiceIntermediateColors(voiceColorConfig)
 
 	Client.config = {
 		settings = settingsConfig,
@@ -757,14 +876,15 @@ local function setupBootstrap()
 		emoji = emojiConfig,
 		typing = typingConfig,
 		bubble = bubbleConfig,
-		distance = distanceConfig,
-		distanceUi = distanceUiConfig,
+		voice = voiceConfig,
 		runtime = clientRuntime,
 		access = accessConfig,
 		channels = channelsConfig,
 		commands = commandsConfig,
 		commandRouting = routingConfig,
-		whispers = whispersConfig
+		whispers = whispersConfig,
+		tabs = tabsConfig,
+		notifications = notificationsConfig
 	}
 
 	Client.constants = {
@@ -782,12 +902,22 @@ local function setupBootstrap()
 		separateChannelTabs = separateChannelTabs,
 		singleChannelId = singleChannelId,
 		autoScrollDefault = uiConfig.autoScrollDefault ~= false,
-		whisperNotificationDefaultEnabled = whisperNotification.enabled ~= false,
-		whisperNotificationVolume = clamp(tonumber(whisperNotification.volume) or 0.65, 0.0, 1.0),
-		whisperNotificationSoundName = tostring(whisperSoundConfig.name or 'TENNIS_POINT_WON'),
-		whisperNotificationSoundSet = tostring(whisperSoundConfig.set or 'HUD_AWARDS'),
-		whisperNotificationFallbackSoundName = tostring(whisperFallbackSoundConfig.name or 'SELECT'),
-		whisperNotificationFallbackSoundSet = tostring(whisperFallbackSoundConfig.set or 'HUD_FRONTEND_DEFAULT_SOUNDSET'),
+		defaultTabGrouping = defaultTabGrouping,
+		notificationDefaultProfile = notificationDefaultProfile,
+		notificationByChannel = notificationByChannel,
+		whisperNotificationDefaultEnabled = whisperNotificationProfile.enabled ~= false,
+		whisperNotificationVolume = clamp(tonumber(whisperNotificationProfile.volume) or 0.65, 0.0, 1.0),
+		whisperNotificationSoundName = tostring((whisperNotificationProfile.sound or {}).name or 'SELECT'),
+		whisperNotificationSoundSet = tostring((whisperNotificationProfile.sound or {}).set or 'HUD_FRONTEND_DEFAULT_SOUNDSET'),
+		whisperNotificationFallbackSoundName = tostring((whisperNotificationProfile.fallbackSound or {}).name or 'SELECT'),
+		whisperNotificationFallbackSoundSet = tostring((whisperNotificationProfile.fallbackSound or {}).set or 'HUD_FRONTEND_DEFAULT_SOUNDSET'),
+		voiceEnabled = voiceConfig.enabled == true,
+		voiceResourceName = voiceResourceName,
+		voiceFallbackLocalDistance = voiceFallbackLocalDistance,
+		voiceColorMin = tostring(voiceColorConfig.colorMin or '#2e85cc'),
+		voiceColorIntermediate = voiceIntermediateColors,
+		voiceColorMax = tostring(voiceColorConfig.colorMax or '#e74c3c'),
+		voicePollRate = math.max(100, tonumber(voiceConfig.pollRate) or 250),
 		whisperSidebarCollapsible = whisperSidebar.collapsible ~= false,
 		whisperSidebarDefaultCollapsed = whisperSidebar.defaultCollapsed == true,
 		chatOpenControl = tonumber(clientRuntime.chatOpenControl) or 245,
@@ -829,18 +959,23 @@ local function setupBootstrap()
 		bubbleToggleAllowed = bubbleConfig.enabled == true and bubbleConfig.allowPlayerToggle == true,
 		bubbleDisplayEnabled = bubbleConfig.enabled == true,
 		whisperSoundToggleAllowed = true,
-		whisperSoundEnabled = whisperNotification.enabled ~= false,
+		whisperSoundEnabled = whisperNotificationProfile.enabled ~= false,
 		autoScrollToggleAllowed = true,
 		autoScrollEnabled = uiConfig.autoScrollDefault ~= false,
-		distanceEnabled = type(distanceConfig) == 'table' and distanceConfig.enabled == true,
-		distanceExpressionCache = {},
-		distanceObservedRanges = {},
+		TabGrouping = defaultTabGroupingState,
+		TabNotificationToggles = {},
+		distanceEnabled = voiceConfig.enabled == true,
+		voiceAvailable = false,
+		voiceModes = {},
+		voiceModeLabels = {},
+		voiceLevelColors = {},
+		voiceErrorShown = false,
 		distanceModeCount = nil,
 		distanceLastPayload = nil,
 		distanceState = {
 			enabled = false,
-			value = tonumber(distanceConfig.default) or 10.0,
-			label = tostring(tonumber(distanceConfig.default) or 10.0),
+			value = voiceFallbackLocalDistance,
+			label = tostring(voiceFallbackLocalDistance),
 			color = '#95a5a6',
 			percent = 0,
 			modeIndex = nil,
@@ -868,7 +1003,7 @@ local function setupBootstrap()
 	state.WhisperColor = normalizeRgbColor(whisperChannel.color, {254, 127, 156})
 	state.WhisperEchoColor = normalizeRgbColor(messagesConfig.whisperOutgoingColor, {204, 77, 106})
 	state.ActionMessageDistance = tonumber(actionMessageConfig.distance) or 50.0
-	state.LocalMessageDistance = tonumber(localChannel.distance) or 50.0
+	state.LocalMessageDistance = voiceFallbackLocalDistance
 
 	IsInProximity = isInProximity
 	bootstrapInitialized = true

@@ -80,7 +80,7 @@ function normalizeFeatureState(state) {
 		typing: payload.typing || { enabled: false, allowToggle: false, active: false },
 		bubbles: payload.bubbles || { enabled: false, allowToggle: false, active: false },
 		autoScroll: payload.autoScroll || { enabled: true, allowToggle: true, active: true },
-		whisperSound: payload.whisperSound || { enabled: true, allowToggle: true, active: true, volume: 0.65 },
+		whisperSound: payload.whisperSound || { enabled: true, allowToggle: true, active: true, mode: 'on', volume: 0.65 },
 		distance: payload.distance || { enabled: false }
 	};
 }
@@ -96,8 +96,22 @@ function applyToggleButtonState(id, feature) {
 		return;
 	}
 
+	const mode = ensureString(feature.mode, '');
+	const blocked = mode === 'allMuted';
+	const canToggle = feature.allowToggle === true && !blocked;
+	const active = feature.active === true && !blocked;
+	if (!button.dataset.defaultTitle) {
+		button.dataset.defaultTitle = button.title || '';
+	}
+
 	button.style.display = 'inline-flex';
-	button.className = `tool-btn icon-btn no-focus${feature.active ? ' active-toggle' : ''}${feature.allowToggle ? '' : ' disabled-toggle'}`;
+	button.className = `tool-btn icon-btn no-focus${active ? ' active-toggle' : ''}${canToggle ? '' : ' disabled-toggle'}${blocked ? ' blocked-toggle' : ''}`;
+
+	if (blocked) {
+		button.title = 'All tabs are muted';
+	} else {
+		button.title = button.dataset.defaultTitle;
+	}
 }
 
 function updateFeatureButtons(state) {

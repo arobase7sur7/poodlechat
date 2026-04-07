@@ -27,6 +27,7 @@ local legacyCommandAliases = {
 	toggleoverhead = {'toggleoverhead'},
 	toggletyping = {'toggletyping'},
 	togglebubbles = {'togglebubbles'},
+	togglesound = {'togglesound', 'sound'},
 	report = {'report'},
 	mute = {'mute'},
 	unmute = {'unmute'},
@@ -864,6 +865,7 @@ local function setupBootstrap()
 	local rawTypingConfig = type(featureConfig.typing) == 'table' and featureConfig.typing or {}
 	local rawBubbleConfig = type(featureConfig.bubbles) == 'table' and featureConfig.bubbles or {}
 	local discordConfig = type(rootConfig.discord) == 'table' and rootConfig.discord or {}
+	local voiceConfig = type(rootConfig.voice) == 'table' and rootConfig.voice or {}
 	local uiConfig = type(rootConfig.ui) == 'table' and rootConfig.ui or {}
 	local channelsConfig = type(rootConfig.channels) == 'table' and rootConfig.channels or {}
 	local commandsConfig = type(rootConfig.commands) == 'table' and rootConfig.commands or {}
@@ -902,7 +904,7 @@ local function setupBootstrap()
 		whisperEchoColor = messagesConfig.whisperOutgoingColor,
 		actionColor = actionMessageConfig.color,
 		actionDistance = actionMessageConfig.distance,
-		localDistance = localChannelConfig.distance
+		localDistance = voiceConfig.fallbackLocalDistance or localChannelConfig.distance
 	}
 
 	local identifierType = tostring(accessConfig.identifier or 'license')
@@ -918,6 +920,8 @@ local function setupBootstrap()
 	local staffMessageColor = normalizeRgbColor(chatConfig.staffColor, {255, 64, 0})
 	local actionMessageDistance = tonumber(chatConfig.actionDistance) or 50.0
 	local localMessageDistance = tonumber(chatConfig.localDistance) or 50.0
+	local voiceEnabled = voiceConfig.enabled == true
+	local voiceResourceName = normalizeKey(tostring(voiceConfig.resource or 'pma-voice')) or 'pma-voice'
 
 	local channelList, channelById = buildChannelDefinitions(channelsConfig, staffChannelAce)
 	local keepLegacyAliases = routingConfig.keepLegacyAliases == true
@@ -998,6 +1002,7 @@ local function setupBootstrap()
 		access = accessConfig,
 		typing = typingConfig,
 		bubble = bubbleConfig,
+		voice = voiceConfig,
 		discord = discordConfig,
 		runtime = serverRuntime,
 		channels = channelsConfig,
@@ -1020,6 +1025,9 @@ local function setupBootstrap()
 		StaffMessageColor = staffMessageColor,
 		ActionMessageDistance = actionMessageDistance,
 		LocalMessageDistance = localMessageDistance,
+		VoiceEnabled = voiceEnabled,
+		VoiceResourceName = voiceResourceName,
+		VoiceFallbackLocalDistance = localMessageDistance,
 		refreshCommandsDelayMs = math.max(0, tonumber(serverRuntime.refreshCommandsDelayMs) or 500),
 		ChannelList = channelList,
 		ChannelById = channelById,

@@ -37,6 +37,9 @@ window.APP = {
 			channels: [],
 			messagesByChannel: {},
 			unreadByChannel: {},
+			channelGrouping: {},
+			defaultChannelGrouping: {},
+			groupingEditorOpen: false,
 			activeChannelId: '',
 			separateChannelTabs: true,
 			singleChannelId: 'local',
@@ -52,6 +55,10 @@ window.APP = {
 			autoScrollEnabled: true,
 			myServerId: 0,
 			whisperNotificationVolume: 0.65,
+			notificationDefaultProfile: {},
+			notificationProfilesByChannel: {},
+			tabNotificationToggles: {},
+			lastNotificationAtByChannel: {},
 			nextMessageId: 1,
 			whisperLimits: {
 				maxConversations: 30,
@@ -73,7 +80,7 @@ window.APP = {
 				typing: { enabled: false, allowToggle: false, active: false },
 				bubbles: { enabled: false, allowToggle: false, active: false },
 				autoScroll: { enabled: true, allowToggle: true, active: true },
-				whisperSound: { enabled: true, allowToggle: true, active: true, volume: 0.65 },
+				whisperSound: { enabled: true, allowToggle: true, active: true, mode: 'on', volume: 0.65 },
 				distance: { enabled: false }
 			}
 		};
@@ -98,9 +105,7 @@ window.APP = {
 			if (typeof this[item.type] === 'function') {
 				try {
 					this[item.type](item);
-				} catch (error) {
-					console.error('poodlechat ui handler failed', item.type, error);
-				}
+				} catch (_) {}
 			}
 		};
 		window.addEventListener('message', this.listener);
@@ -152,10 +157,13 @@ window.APP = {
 			return sorted.length > 0 ? [sorted[0]] : [];
 		},
 		currentMessages() {
-			return this.messagesByChannel[this.activeChannelId] || [];
+			return this.mergedMessagesForChannel(this.activeChannelId);
 		},
 		isWhispersActive() {
-			return this.whisperTabEnabled && this.activeChannelId === 'whispers';
+			if (!this.whisperTabEnabled || this.activeChannelId !== 'whispers') {
+				return false;
+			}
+			return this.groupChannelsFor('whispers').length === 1;
 		},
 		activeChannelCanSend() {
 			const channel = this.channelById(this.activeChannelId);
@@ -224,31 +232,16 @@ window.APP = {
 			const normalized = this.normalizeIncomingMessage(message);
 			this.pushMessage(normalized);
 			const isOwn = this.isOwnMessage(normalized);
+			const isVisible = this.isMessageVisible(normalized);
+			const shouldMarkUnread = !isOwn && !isVisible;
 
-			let shouldMarkUnread = !isOwn && normalized.channel !== this.activeChannelId;
-			if (!shouldMarkUnread && this.isWhispersActive && normalized.channel === 'whispers') {
-				const messageConversation = normalized.metadata && normalized.metadata.conversationId
-					? String(normalized.metadata.conversationId)
-					: null;
-				shouldMarkUnread = !isOwn && !!messageConversation && messageConversation !== this.activeWhisperConversationId;
-			}
 			if (this.whisperTabEnabled && normalized.channel === 'whispers') {
 				this.syncWhisperChannelUnread();
 			} else if (shouldMarkUnread) {
 				this.incrementChannelUnread(normalized.channel, 1);
 			}
 
-			const metadata = normalized.metadata || {};
-			const incomingWhisper = metadata.type === 'whisper' && metadata.direction === 'in';
-			if (
-				incomingWhisper &&
-				(!this.whisperTabEnabled || normalized.channel !== 'whispers') &&
-				!this.showInput &&
-				this.featureState.whisperSound &&
-				this.featureState.whisperSound.active
-			) {
-				this.playWhisperNotificationSound();
-			}
+			this.handleIncomingNotification(normalized, isOwn, isVisible);
 
 			this.bumpWindow();
 			this.$nextTick(() => {
@@ -266,6 +259,8 @@ window.APP = {
 			this.whisperPickerOpen = false;
 			this.whisperTargets = [];
 			this.unreadByChannel = {};
+			this.groupingEditorOpen = false;
+			this.lastNotificationAtByChannel = {};
 			this.oldMessages = [];
 			this.oldMessagesIndex = -1;
 		},
@@ -299,7 +294,7 @@ window.APP = {
 				return;
 			}
 			if (this.templates[template.id]) {
-				this.warn(`Tried to add duplicate template '${template.id}'`);
+				return;
 			} else {
 				this.templates[template.id] = template.html;
 			}
@@ -376,7 +371,30 @@ window.APP = {
 				}
 			}
 
+			let initialGrouping = {};
+			let defaultGrouping = {};
+			if (data.tabs && typeof data.tabs === 'object') {
+				if (data.tabs.defaultGrouping && typeof data.tabs.defaultGrouping === 'object') {
+					defaultGrouping = data.tabs.defaultGrouping;
+				}
+				if (data.tabs.grouping && typeof data.tabs.grouping === 'object') {
+					initialGrouping = data.tabs.grouping;
+				} else if (Object.keys(defaultGrouping).length > 0) {
+					initialGrouping = defaultGrouping;
+				}
+			}
+
 			this.applyChannels(data.channels || [], data.activeChannel || '');
+			this.setDefaultTabGrouping(defaultGrouping);
+			this.setTabGrouping({ grouping: initialGrouping, persist: false });
+
+			if (data.notifications && typeof data.notifications === 'object') {
+				this.setTabNotificationPrefs({
+					defaultProfile: data.notifications.default,
+					channels: data.notifications.channels,
+					toggles: data.notifications.toggles
+				});
+			}
 
 			if (data.features) {
 				this.setFeatureState({ state: data.features });
@@ -417,6 +435,9 @@ window.APP = {
 			for (let i = 0; i < channels.length; i += 1) {
 				this.ensureChannelHistory(channels[i].id);
 			}
+			this.normalizeDefaultGroupingMap();
+			this.normalizeGroupingMap();
+			this.normalizeNotificationToggles();
 
 			let nextChannel = desiredActiveChannel || this.activeChannelId;
 			if (!this.separateChannelTabs) {
@@ -431,6 +452,287 @@ window.APP = {
 			}
 
 			this.setChannel({ channelId: nextChannel || 'global' });
+		},
+		normalizeGroupingMap() {
+			const normalized = {};
+			let highestGroup = 0;
+			for (let i = 0; i < this.channels.length; i += 1) {
+				const channelId = this.channels[i].id;
+				const groupId = Number(this.channelGrouping[channelId]);
+				if (Number.isFinite(groupId) && groupId > 0) {
+					const fixed = Math.floor(groupId);
+					normalized[channelId] = fixed;
+					if (fixed > highestGroup) {
+						highestGroup = fixed;
+					}
+				}
+			}
+
+			for (let i = 0; i < this.channels.length; i += 1) {
+				const channelId = this.channels[i].id;
+				if (!normalized[channelId]) {
+					highestGroup += 1;
+					normalized[channelId] = highestGroup;
+				}
+			}
+
+			this.channelGrouping = normalized;
+		},
+		normalizeDefaultGroupingMap() {
+			const normalized = {};
+			let highestGroup = 0;
+			const source = this.defaultChannelGrouping && typeof this.defaultChannelGrouping === 'object' ? this.defaultChannelGrouping : {};
+
+			for (let i = 0; i < this.channels.length; i += 1) {
+				const channelId = this.channels[i].id;
+				const groupId = Number(source[channelId]);
+				if (Number.isFinite(groupId) && groupId > 0) {
+					const fixed = Math.floor(groupId);
+					normalized[channelId] = fixed;
+					if (fixed > highestGroup) {
+						highestGroup = fixed;
+					}
+				}
+			}
+
+			for (let i = 0; i < this.channels.length; i += 1) {
+				const channelId = this.channels[i].id;
+				if (!normalized[channelId]) {
+					highestGroup += 1;
+					normalized[channelId] = highestGroup;
+				}
+			}
+
+			this.defaultChannelGrouping = normalized;
+		},
+		setDefaultTabGrouping(grouping) {
+			const source = grouping && typeof grouping === 'object' ? grouping : {};
+			this.defaultChannelGrouping = {...source};
+			this.normalizeDefaultGroupingMap();
+		},
+		setTabGrouping({ grouping, persist = false }) {
+			const nextGrouping = {};
+			const source = grouping && typeof grouping === 'object' ? grouping : {};
+			for (let i = 0; i < this.channels.length; i += 1) {
+				const channelId = this.channels[i].id;
+				const groupId = Number(source[channelId]);
+				if (Number.isFinite(groupId) && groupId > 0) {
+					nextGrouping[channelId] = Math.floor(groupId);
+				}
+			}
+			this.channelGrouping = nextGrouping;
+			this.normalizeGroupingMap();
+			if (persist) {
+				fetchJson('setTabGrouping', { grouping: this.channelGrouping }).catch(() => null);
+			}
+		},
+		groupIdForChannel(channelId) {
+			const value = Number(this.channelGrouping[channelId]);
+			if (!Number.isFinite(value) || value <= 0) {
+				return 0;
+			}
+			return Math.floor(value);
+		},
+		defaultGroupIdForChannel(channelId) {
+			const value = Number(this.defaultChannelGrouping[channelId]);
+			if (!Number.isFinite(value) || value <= 0) {
+				return 0;
+			}
+			return Math.floor(value);
+		},
+		nextGroupingId() {
+			let highestGroup = 0;
+			for (let i = 0; i < this.channels.length; i += 1) {
+				const groupId = this.groupIdForChannel(this.channels[i].id);
+				if (groupId > highestGroup) {
+					highestGroup = groupId;
+				}
+			}
+			return highestGroup + 1;
+		},
+		groupChannelsFor(channelId) {
+			const groupId = this.groupIdForChannel(channelId);
+			if (!groupId) {
+				return channelId ? [channelId] : [];
+			}
+			const grouped = this.channels
+				.filter((entry) => entry.visible !== false && entry.allowed !== false && this.groupIdForChannel(entry.id) === groupId)
+				.map((entry) => entry.id);
+			if (grouped.length === 0 && channelId) {
+				return [channelId];
+			}
+			return grouped;
+		},
+		mergedMessagesForChannel(channelId) {
+			const groupChannels = this.groupChannelsFor(channelId);
+			if (groupChannels.length <= 1) {
+				return this.messagesByChannel[channelId] || [];
+			}
+			const merged = [];
+			for (let i = 0; i < groupChannels.length; i += 1) {
+				const list = this.messagesByChannel[groupChannels[i]] || [];
+				for (let j = 0; j < list.length; j += 1) {
+					merged.push(list[j]);
+				}
+			}
+			merged.sort((a, b) => Number(a._id) - Number(b._id));
+			return merged;
+		},
+		groupingAnchorChannelId(channelId) {
+			const groupId = this.groupIdForChannel(channelId);
+			if (!groupId) {
+				return channelId;
+			}
+			const groupedChannels = this.visibleChannels.filter((entry) => this.groupIdForChannel(entry.id) === groupId);
+			if (groupedChannels.length === 0) {
+				return channelId;
+			}
+			return groupedChannels[0].id;
+		},
+		groupingSelectionValue(channelId) {
+			return this.groupingAnchorChannelId(channelId);
+		},
+		toggleGroupingEditor() {
+			this.groupingEditorOpen = !this.groupingEditorOpen;
+		},
+		setChannelGroup(channelId, rawSelection) {
+			const sourceChannel = this.channelById(channelId);
+			if (!sourceChannel || sourceChannel.visible === false || sourceChannel.allowed === false) {
+				return;
+			}
+
+			const selection = ensureString(rawSelection, '');
+			let targetGroupId = 0;
+			const selectedChannel = this.channelById(selection);
+			if (!selectedChannel || selectedChannel.visible === false || selectedChannel.allowed === false) {
+				return;
+			}
+
+			if (selectedChannel.id === channelId) {
+				const grouped = this.groupChannelsFor(channelId);
+				if (grouped.length > 1) {
+					targetGroupId = this.nextGroupingId();
+				} else {
+					targetGroupId = this.groupIdForChannel(channelId);
+				}
+			} else {
+				targetGroupId = this.groupIdForChannel(selectedChannel.id);
+			}
+
+			if (!Number.isFinite(targetGroupId) || targetGroupId <= 0) {
+				targetGroupId = this.nextGroupingId();
+			}
+
+			targetGroupId = Math.floor(targetGroupId);
+			if (this.groupIdForChannel(channelId) === targetGroupId) {
+				return;
+			}
+
+			this.$set(this.channelGrouping, channelId, targetGroupId);
+			this.normalizeGroupingMap();
+			this.clearGroupUnread(this.activeChannelId);
+			fetchJson('setTabGrouping', { grouping: this.channelGrouping })
+				.then((resp) => {
+					if (resp && resp.grouping) {
+						this.setTabGrouping({ grouping: resp.grouping, persist: false });
+						this.clearGroupUnread(this.activeChannelId);
+					}
+				})
+				.catch(() => null);
+			this.$nextTick(() => this.scrollActiveMessages(false));
+		},
+		normalizeNotificationToggles() {
+			const normalized = {};
+			for (let i = 0; i < this.channels.length; i += 1) {
+				const channelId = this.channels[i].id;
+				if (this.tabNotificationToggles[channelId] !== undefined) {
+					normalized[channelId] = this.tabNotificationToggles[channelId] === true;
+				}
+			}
+			this.tabNotificationToggles = normalized;
+		},
+		setTabNotificationPrefs({ defaultProfile, channels, toggles }) {
+			if (defaultProfile && typeof defaultProfile === 'object') {
+				this.notificationDefaultProfile = defaultProfile;
+			}
+			if (channels && typeof channels === 'object') {
+				this.notificationProfilesByChannel = channels;
+			}
+			if (toggles && typeof toggles === 'object') {
+				const next = {};
+				for (let i = 0; i < this.channels.length; i += 1) {
+					const channelId = this.channels[i].id;
+					if (toggles[channelId] !== undefined) {
+						next[channelId] = toggles[channelId] === true;
+					}
+				}
+				this.tabNotificationToggles = next;
+			}
+			this.normalizeNotificationToggles();
+		},
+		isTabSoundEnabled(channelId) {
+			if (this.tabNotificationToggles[channelId] !== undefined) {
+				return this.tabNotificationToggles[channelId] === true;
+			}
+			const profile = this.notificationProfilesByChannel[channelId] || this.notificationDefaultProfile || {};
+			return profile.enabled !== false;
+		},
+		toggleTabSound(channelId) {
+			const nextState = !this.isTabSoundEnabled(channelId);
+			this.$set(this.tabNotificationToggles, channelId, nextState);
+			fetchJson('setTabNotificationToggle', { channelId, enabled: nextState })
+				.then((resp) => {
+					if (resp && resp.toggles) {
+						this.setTabNotificationPrefs({ toggles: resp.toggles });
+					}
+					if (resp && resp.feature) {
+						this.setFeatureState({ state: resp.feature });
+					}
+				})
+				.catch(() => null);
+		},
+		isMessageVisible(message) {
+			if (!message || !message.channel) {
+				return false;
+			}
+			const activeChannels = this.groupChannelsFor(this.activeChannelId);
+			if (activeChannels.indexOf(message.channel) === -1) {
+				return false;
+			}
+			if (message.channel !== 'whispers' || !this.whisperTabEnabled) {
+				return true;
+			}
+			if (!this.isWhispersActive) {
+				return true;
+			}
+			const metadata = message.metadata || {};
+			const conversationId = metadata.conversationId ? String(metadata.conversationId) : null;
+			if (!conversationId) {
+				return true;
+			}
+			return conversationId === this.activeWhisperConversationId;
+		},
+		handleIncomingNotification(message, isOwn, isVisible) {
+			if (isOwn || isVisible || this.showInput) {
+				return;
+			}
+			const globalSound = this.featureState.whisperSound || {};
+			if (globalSound.active !== true || ensureString(globalSound.mode, '') === 'allMuted') {
+				return;
+			}
+			if (!this.isTabSoundEnabled(message.channel)) {
+				return;
+			}
+			const now = Date.now();
+			const lastPlayedAt = Number(this.lastNotificationAtByChannel[message.channel]) || 0;
+			if (now - lastPlayedAt < 180) {
+				return;
+			}
+			this.$set(this.lastNotificationAtByChannel, message.channel, now);
+			this.playChannelNotificationSound(message.channel);
+		},
+		playChannelNotificationSound(channelId) {
+			postJson('playWhisperSound', { channelId });
 		},
 		setChannel({ channelId }) {
 			let target = ensureString(channelId, '');
@@ -447,7 +749,7 @@ window.APP = {
 				return;
 			}
 			this.activeChannelId = target;
-			this.clearChannelUnread(target);
+			this.clearGroupUnread(target);
 			if (this.isWhispersActive && this.activeWhisperConversationId && this.whisperConversations[this.activeWhisperConversationId]) {
 				this.whisperConversations[this.activeWhisperConversationId].unread = 0;
 			}
@@ -473,6 +775,12 @@ window.APP = {
 				return;
 			}
 			this.$set(this.unreadByChannel, id, 0);
+		},
+		clearGroupUnread(channelId) {
+			const grouped = this.groupChannelsFor(channelId);
+			for (let i = 0; i < grouped.length; i += 1) {
+				this.clearChannelUnread(grouped[i]);
+			}
 		},
 		singleAllowedChannelId() {
 			const preferred = this.channels.find((channel) => channel.id === this.singleChannelId && channel.visible !== false && channel.allowed !== false);
@@ -516,6 +824,9 @@ window.APP = {
 					...channel,
 					allowed: permissions.channels[channel.id] !== false
 				}));
+				this.normalizeDefaultGroupingMap();
+				this.normalizeGroupingMap();
+				this.normalizeNotificationToggles();
 				if (!this.isChannelAllowedById(this.activeChannelId)) {
 					const fallback = this.firstAllowedChannelId();
 					if (fallback) {
@@ -588,10 +899,11 @@ window.APP = {
 
 			const direction = ensureString(normalizedMetadata.direction, '');
 			const incoming = direction === 'in';
-			if (this.isWhispersActive && this.activeWhisperConversationId === conversationId) {
-				conversation.unread = 0;
-			} else if (incoming) {
+			const isVisibleNow = this.isMessageVisible(message);
+			if (incoming && !isVisibleNow) {
 				conversation.unread += 1;
+			} else if (incoming || direction === 'out') {
+				conversation.unread = 0;
 			}
 
 			this.$delete(this.hiddenWhisperConversations, conversationId);
@@ -604,12 +916,14 @@ window.APP = {
 				conversation.unread = 0;
 			} else if (!this.activeWhisperConversationId) {
 				this.activeWhisperConversationId = conversationId;
+				if (this.isWhispersActive) {
+					conversation.unread = 0;
+				}
+			}
+			if (this.isWhispersActive && this.activeWhisperConversationId === conversationId) {
+				conversation.unread = 0;
 			}
 			this.syncWhisperChannelUnread();
-
-			if (incoming && !this.showInput && this.featureState.whisperSound && this.featureState.whisperSound.active) {
-				this.playWhisperNotificationSound();
-			}
 		},
 		trimWhisperConversations() {
 			const maxConversations = normalizeLimit(this.whisperLimits.maxConversations, 30);
@@ -715,11 +1029,7 @@ window.APP = {
 			this.$nextTick(() => this.scrollActiveMessages(false));
 		},
 		playWhisperNotificationSound() {
-			const volume = Math.max(0, Math.min(1, Number(this.whisperNotificationVolume) || 0.65));
-			if (volume <= 0) {
-				return;
-			}
-			postJson('playWhisperSound', { volume });
+			this.playChannelNotificationSound('whispers');
 		},
 		selectChannel(channelId) {
 			if (!this.isChannelAllowedById(channelId)) {
@@ -777,16 +1087,8 @@ window.APP = {
 			if (!this.autoScrollEnabled) {
 				return;
 			}
-			if (!message || message.channel !== this.activeChannelId) {
+			if (!message || !this.isMessageVisible(message)) {
 				return;
-			}
-			if (this.isWhispersActive) {
-				const messageConversation = message.metadata && message.metadata.conversationId
-					? String(message.metadata.conversationId)
-					: null;
-				if (messageConversation && messageConversation !== this.activeWhisperConversationId) {
-					return;
-				}
 			}
 			this.scrollActiveMessages(false);
 		},
@@ -868,15 +1170,6 @@ window.APP = {
 					}
 				}
 			}
-		},
-		warn(msg) {
-			this.ON_MESSAGE({
-				message: {
-					channel: this.activeChannelId || 'global',
-					args: [msg],
-					template: '^3<b>CHAT-WARN</b>: ^0{0}'
-				}
-			});
 		},
 		clearShowWindowTimer() {
 			clearTimeout(this.showWindowTimer);
@@ -1011,6 +1304,12 @@ window.APP = {
 				.then((resp) => {
 					if (resp && typeof resp.active === 'boolean') {
 						this.featureState.whisperSound.active = resp.active;
+					}
+					if (resp && typeof resp.allowToggle === 'boolean') {
+						this.featureState.whisperSound.allowToggle = resp.allowToggle;
+					}
+					if (resp && typeof resp.mode === 'string') {
+						this.featureState.whisperSound.mode = resp.mode;
 					}
 					const volume = Number(resp && resp.volume);
 					if (Number.isFinite(volume)) {

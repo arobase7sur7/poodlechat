@@ -66,9 +66,9 @@ em {
 	position: absolute;
 	top: 1.5%;
 	left: 0.8%;
-	width: 38%;
+	width: 52%;
 	height: 25%;
-	max-width: 1000px;
+	max-width: 1320px;
 }
 
 .chat-window::before {
@@ -417,6 +417,7 @@ em {
 .channels {
 	display: inline-flex;
 	align-items: center;
+	flex: 1 1 auto;
 	gap: 0.2vw;
 	padding: 0.18vh 0.22vw;
 	background-color: var(--panel-bg);
@@ -497,6 +498,90 @@ em {
 	font-size: 1.5vh;
 }
 
+#grouping-toggle {
+	padding-left: 0.38vw;
+	padding-right: 0.38vw;
+}
+
+#grouping-toggle .btn-icon {
+	width: 1.35vh;
+	height: 1.35vh;
+}
+
+.grouping-editor {
+	display: flex;
+	flex-direction: column;
+	gap: 0.2vh;
+	padding: 0.38vh 0.42vw;
+	background: rgba(25, 27, 31, 0.96);
+	border: 1px solid var(--panel-border);
+	border-radius: 0 0 8px 8px;
+	box-shadow: var(--shadow-soft);
+}
+
+.grouping-row {
+	display: grid;
+	grid-template-columns: minmax(5vw, 1fr) minmax(11.2vw, 1fr) minmax(3.6vw, auto);
+	align-items: center;
+	gap: 0.22vw;
+}
+
+.grouping-channel {
+	font-size: 1.14vh;
+	color: var(--text-main);
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.grouping-select {
+	appearance: none;
+	-webkit-appearance: none;
+	background: rgba(41, 45, 52, 0.98);
+	color: var(--text-main);
+	border: 1px solid rgba(255, 255, 255, 0.14);
+	border-radius: 5px;
+	padding: 0.12vh 0.42vw;
+	font-size: 1.02vh;
+	height: 2.12vh;
+	outline: none;
+	width: 100%;
+}
+
+.grouping-target {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.26vw;
+	min-width: 0;
+}
+
+.grouping-target-prefix {
+	font-size: 0.98vh;
+	color: var(--text-muted);
+	white-space: nowrap;
+}
+
+.grouping-sound-btn {
+	appearance: none;
+	-webkit-appearance: none;
+	border: 1px solid rgba(177, 201, 224, 0.3);
+	background: rgba(66, 109, 145, 0.24);
+	color: #b8ddff;
+	border-radius: 5px;
+	font-size: 0.95vh;
+	font-weight: 700;
+	letter-spacing: 0.03em;
+	padding: 0.1vh 0.36vw;
+	height: 2.12vh;
+	cursor: pointer;
+}
+
+.grouping-sound-btn.muted {
+	background: rgba(135, 92, 53, 0.2);
+	border-color: rgba(255, 205, 152, 0.26);
+	color: #ffd8ac;
+}
+
 .tool-btn {
 	display: inline-flex;
 	align-items: center;
@@ -556,6 +641,13 @@ em {
 .disabled-toggle {
 	opacity: 0.45;
 	cursor: default;
+}
+
+.blocked-toggle {
+	background: #a86a20;
+	border-color: rgba(248, 211, 152, 0.58);
+	color: #fff5e5;
+	opacity: 0.92;
 }
 
 #distance-widget {

@@ -34,7 +34,6 @@ local function registerNuiCallbackSafe(name, fallbackResponse, handler)
 
 		local ok, result = pcall(handler, data, safeRespond)
 		if not ok then
-			print(('[poodlechat] NUI callback failed (%s): %s'):format(name, tostring(result)))
 			safeRespond(fallbackResponse)
 			return
 		end
@@ -79,8 +78,6 @@ local function registerNuiHandlers()
 	end)
 
 	AddEventHandler('__cfx_internal:serverPrint', function(msg)
-		print(msg)
-
 		forwardMessageToNui({
 			channel = constants.defaultChannelId,
 			label = 'Print',
@@ -197,11 +194,16 @@ local function registerNuiHandlers()
 
 	registerNuiCallbackSafe('toggleWhisperSound', {
 		active = state.whisperSoundEnabled,
+		allowToggle = state.whisperSoundToggleAllowed == true,
+		mode = state.whisperSoundEnabled and 'on' or 'off',
 		volume = tonumber(constants.whisperNotificationVolume) or 0.65
 	}, function()
-		local current = Client.toggleWhisperSound()
+		Client.toggleWhisperSound()
+		local feature = (Client.getFeatureStatePayload() or {}).whisperSound or {}
 		return {
-			active = current,
+			active = feature.active == true,
+			allowToggle = feature.allowToggle == true,
+			mode = tostring(feature.mode or 'off'),
 			volume = tonumber(constants.whisperNotificationVolume) or 0.65
 		}
 	end)
@@ -211,9 +213,34 @@ local function registerNuiHandlers()
 		return {active = current}
 	end)
 
-	registerNuiCallbackSafe('playWhisperSound', {}, function()
-		Client.playWhisperSound()
+	registerNuiCallbackSafe('playWhisperSound', {}, function(data)
+		local payload = type(data) == 'table' and data or {}
+		local channelId = payload.channelId
+		if Client.playTabNotificationSound then
+			Client.playTabNotificationSound(channelId)
+		else
+			Client.playWhisperSound()
+		end
 		return {}
+	end)
+
+	registerNuiCallbackSafe('setTabGrouping', {grouping = {}}, function(data)
+		local grouping = type(data) == 'table' and data.grouping or {}
+		local resolved = Client.setTabGrouping(grouping)
+		return {grouping = resolved}
+	end)
+
+	registerNuiCallbackSafe('setTabNotificationToggle', {channelId = '', enabled = true, toggles = {}, feature = {}}, function(data)
+		local payload = type(data) == 'table' and data or {}
+		local channelId = payload.channelId
+		local enabled = payload.enabled == true
+		Client.setTabNotificationToggle(channelId, enabled)
+		return {
+			channelId = channelId,
+			enabled = enabled,
+			toggles = Client.getTabNotificationToggles(),
+			feature = Client.getFeatureStatePayload()
+		}
 	end)
 
 	registerNuiCallbackSafe('setChannel', {}, function(data)
@@ -235,6 +262,9 @@ local function registerNuiHandlers()
 		Client.refreshCommands()
 		Client.refreshThemes()
 		state.chatLoaded = true
+		if Client.refreshVoiceAvailability then
+			Client.refreshVoiceAvailability(true)
+		end
 		Client.sendFeatureState()
 		Client.refreshDistanceModeCount()
 		return 'ok'
@@ -273,19 +303,6 @@ local function registerNuiHandlers()
 		Client.refreshThemes()
 	end)
 
-	AddEventHandler('onClientResourceStart', function(resName)
-		if resName ~= 'pma-voice' then
-			return
-		end
-
-		if not state.distanceEnabled then
-			return
-		end
-
-		Wait(constants.pmaStartDelayMs)
-		Client.refreshDistanceModeCount()
-	end)
-
 	AddEventHandler('onClientResourceStop', function(resName)
 		Wait(constants.resourceRefreshDelayMs)
 		Client.refreshCommands()
@@ -301,22 +318,12 @@ local function registerNuiHandlers()
 		SetNuiFocus(false, false)
 		TriggerServerEvent('poodlechat:getPermissions')
 
-		local okLoadSaved, loadSavedError = pcall(Client.LoadSavedSettings)
-		if not okLoadSaved then
-			print(('[poodlechat] Failed to load saved settings: %s'):format(tostring(loadSavedError)))
-		end
-
-		local okParseEmojiDataset, parseEmojiDatasetError = pcall(Client.parseEmojiDataset)
-		if not okParseEmojiDataset then
-			print(('[poodlechat] Failed to parse emoji dataset: %s'):format(tostring(parseEmojiDatasetError)))
-		end
+		pcall(Client.LoadSavedSettings)
+		pcall(Client.parseEmojiDataset)
 
 		Client.registerStartupSuggestions()
 
-		local okEmojiSuggestions, emojiSuggestionsError = pcall(Client.AddEmojiSuggestions)
-		if not okEmojiSuggestions then
-			print(('[poodlechat] Failed to register emoji suggestions: %s'):format(tostring(emojiSuggestionsError)))
-		end
+		pcall(Client.AddEmojiSuggestions)
 
 		Client.sendFeatureState()
 		Client.refreshDistanceState(true)
