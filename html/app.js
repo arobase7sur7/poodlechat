@@ -21,6 +21,8 @@ function normalizeLimit(value, fallback) {
 	return Math.max(1, Number(fallback) || 1);
 }
 
+let tabGroupingPersistQueue = Promise.resolve();
+
 window.APP = {
 	template: '#app_template',
 	name: 'app',
@@ -39,6 +41,7 @@ window.APP = {
 			unreadByChannel: {},
 			channelGrouping: {},
 			defaultChannelGrouping: {},
+			groupingPersistRequestId: 0,
 			groupingEditorOpen: false,
 			activeChannelId: '',
 			separateChannelTabs: true,
@@ -523,8 +526,28 @@ window.APP = {
 			this.channelGrouping = nextGrouping;
 			this.normalizeGroupingMap();
 			if (persist) {
-				fetchJson('setTabGrouping', { grouping: this.channelGrouping }).catch(() => null);
+				this.persistTabGrouping();
 			}
+		},
+		persistTabGrouping() {
+			this.groupingPersistRequestId += 1;
+			const requestId = this.groupingPersistRequestId;
+			const snapshot = { ...this.channelGrouping };
+			const task = tabGroupingPersistQueue
+				.catch(() => null)
+				.then(() => fetchJson('setTabGrouping', { grouping: snapshot }))
+				.then((resp) => {
+					if (requestId !== this.groupingPersistRequestId) {
+						return resp;
+					}
+					if (resp && resp.grouping) {
+						this.setTabGrouping({ grouping: resp.grouping, persist: false });
+					}
+					return resp;
+				})
+				.catch(() => null);
+			tabGroupingPersistQueue = task.then(() => null);
+			return task;
 		},
 		groupIdForChannel(channelId) {
 			const value = Number(this.channelGrouping[channelId]);
@@ -631,14 +654,11 @@ window.APP = {
 			this.$set(this.channelGrouping, channelId, targetGroupId);
 			this.normalizeGroupingMap();
 			this.clearGroupUnread(this.activeChannelId);
-			fetchJson('setTabGrouping', { grouping: this.channelGrouping })
-				.then((resp) => {
-					if (resp && resp.grouping) {
-						this.setTabGrouping({ grouping: resp.grouping, persist: false });
-						this.clearGroupUnread(this.activeChannelId);
-					}
-				})
-				.catch(() => null);
+			this.persistTabGrouping().then((resp) => {
+				if (resp && resp.grouping) {
+					this.clearGroupUnread(this.activeChannelId);
+				}
+			});
 			this.$nextTick(() => this.scrollActiveMessages(false));
 		},
 		normalizeNotificationToggles() {
