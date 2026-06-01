@@ -17,6 +17,7 @@ Client.netEvents = {
 	'poodlechat:globalMessage',
 	'poodlechat:localMessage',
 	'poodlechat:action',
+	'poodlechat:scene',
 	'poodlechat:whisperEcho',
 	'poodlechat:whisper',
 	'poodlechat:whisperTargets',
@@ -28,17 +29,20 @@ Client.netEvents = {
 	'poodlechat:unmute',
 	'poodlechat:showMuted',
 	'poodlechat:typingState',
-	'poodlechat:bubbleMessage'
+	'poodlechat:bubbleMessage',
+	'poodlechat:manager:response'
 }
 
 local legacyCommandAliases = {
 	global = {'global', 'g'},
 	say = {'say'},
 	me = {'me'},
+	["do"] = {'do'},
 	staff = {'staff'},
 	whisper = {'whisper', 'w', 'msg', 'dm'},
 	reply = {'reply', 'r'},
 	clear = {'clear'},
+	clearhistory = {'clearhistory', 'clearhist'},
 	togglechat = {'togglechat'},
 	toggleoverhead = {'toggleoverhead'},
 	toggletyping = {'toggletyping'},
@@ -515,6 +519,53 @@ local function buildRoutingOverrides(overrides, channelById)
 	return normalized
 end
 
+local function normalizeInboundMatchList(value)
+	if type(value) == 'table' then
+		local list = {}
+		for i = 1, #value do
+			local entry = tostring(value[i] or ''):gsub('^%s+', ''):gsub('%s+$', '')
+			if entry ~= '' then
+				list[#list + 1] = entry
+			end
+		end
+		return list
+	end
+
+	local single = tostring(value or ''):gsub('^%s+', ''):gsub('%s+$', '')
+	if single == '' then
+		return {}
+	end
+
+	return {single}
+end
+
+local function buildInboundMessageRules(rules, channelById)
+	local normalized = {}
+	if type(rules) ~= 'table' then
+		return normalized
+	end
+
+	for i = 1, #rules do
+		local rawRule = rules[i]
+		if type(rawRule) == 'table' then
+			local channelId = normalizeKey(rawRule.channel)
+			if channelId and channelById[channelId] then
+				local entry = {
+					channel = channelId,
+					labels = normalizeInboundMatchList(rawRule.labels or rawRule.label),
+					prefixes = normalizeInboundMatchList(rawRule.prefixes or rawRule.prefix),
+					pattern = type(rawRule.pattern) == 'string' and rawRule.pattern ~= '' and rawRule.pattern or nil,
+					templateContains = normalizeInboundMatchList(rawRule.templateContains or rawRule.template),
+					templatePattern = type(rawRule.templatePattern) == 'string' and rawRule.templatePattern ~= '' and rawRule.templatePattern or nil
+				}
+				normalized[#normalized + 1] = entry
+			end
+		end
+	end
+
+	return normalized
+end
+
 local function resolveCommandChannel(commandName)
 	local state = Client.state
 	local constants = Client.constants
@@ -726,6 +777,7 @@ local function setupBootstrap()
 	local runtimeConfig = type(rootConfig.runtime) == 'table' and rootConfig.runtime or {}
 	local clientRuntime = type(runtimeConfig.client) == 'table' and runtimeConfig.client or {}
 	local accessConfig = type(rootConfig.access) == 'table' and rootConfig.access or {}
+	local integrationsConfig = type(rootConfig.integrations) == 'table' and rootConfig.integrations or {}
 	local channelsConfig = type(rootConfig.channels) == 'table' and rootConfig.channels or {}
 	local commandsConfig = type(rootConfig.commands) == 'table' and rootConfig.commands or {}
 	local routingConfig = type(rootConfig.routing) == 'table' and rootConfig.routing or {}
@@ -734,6 +786,7 @@ local function setupBootstrap()
 	local notificationsConfig = type(rootConfig.notifications) == 'table' and rootConfig.notifications or {}
 	local messagesConfig = type(rootConfig.messages) == 'table' and rootConfig.messages or {}
 	local actionMessageConfig = type(messagesConfig.action) == 'table' and messagesConfig.action or {}
+	local sceneMessageConfig = type(messagesConfig.scene) == 'table' and messagesConfig.scene or {}
 
 	uiConfig.displayOverheadByDefault = uiOverheadConfig.enabledByDefault == true
 	uiConfig.overheadDistance = tonumber(uiOverheadConfig.distance) or tonumber(uiConfig.overheadDistance) or 50.0
@@ -757,6 +810,7 @@ local function setupBootstrap()
 	local bubbleConfig = {
 		enabled = rawBubbleConfig.enabled == true,
 		allowPlayerToggle = rawBubbleConfig.allowToggle == true,
+		rangeMode = normalizeKey(rawBubbleConfig.rangeMode) or 'fixed',
 		maxDistance = tonumber(rawBubbleConfig.maxDistance) or 25.0,
 		fadeOutTime = tonumber(rawBubbleConfig.fadeOutMs) or 4000,
 		maxLength = tonumber(rawBubbleConfig.maxLength) or 80,
@@ -783,13 +837,52 @@ local function setupBootstrap()
 	local separateChannelTabs = true
 	local singleChannelId = defaultChannelId
 
-	local whisperTabEnabled = whispersConfig.tabEnabled ~= false
+	local tabGroupRelayTargetByChannel = {}
+	local tabPinnedByChannel = {}
+	for i = 1, #channelList do
+		local channelId = channelList[i].id
+		local defaultsToRelayTarget = channelId ~= 'whispers' and channelId ~= 'radio'
+		local defaultsToPinned = channelId == 'local' or channelId == 'global'
+		local channelConfig = type(channelsConfig[channelId]) == 'table' and channelsConfig[channelId] or {}
+		local legacyTabConfig = type(tabsConfig.channels) == 'table' and type(tabsConfig.channels[channelId]) == 'table' and tabsConfig.channels[channelId] or {}
+		if channelConfig.groupRelayTarget == nil then
+			if legacyTabConfig.groupRelayTarget == nil then
+				tabGroupRelayTargetByChannel[channelId] = defaultsToRelayTarget
+			else
+				tabGroupRelayTargetByChannel[channelId] = legacyTabConfig.groupRelayTarget == true
+			end
+		else
+			tabGroupRelayTargetByChannel[channelId] = channelConfig.groupRelayTarget == true
+		end
+		if channelConfig.pinned == nil then
+			if legacyTabConfig.pinned == nil then
+				tabPinnedByChannel[channelId] = defaultsToPinned
+			else
+				tabPinnedByChannel[channelId] = legacyTabConfig.pinned == true
+			end
+		else
+			tabPinnedByChannel[channelId] = channelConfig.pinned == true
+		end
+	end
+
+	local whisperChannelEnabled = whispersConfig.tabEnabled ~= false
+	local whisperTabLabel = type(whispersConfig.tabLabel) == 'string' and whispersConfig.tabLabel:gsub('^%s+', ''):gsub('%s+$', '') or ''
+	if whisperTabLabel ~= '' and channelById.whispers then
+		channelById.whispers.label = whisperTabLabel
+		for i = 1, #channelList do
+			if channelList[i].id == 'whispers' then
+				channelList[i].label = whisperTabLabel
+				break
+			end
+		end
+	end
+	local whisperTabEnabled = whisperChannelEnabled and tabGroupRelayTargetByChannel.whispers ~= true
 	local whisperFallbackChannelId = normalizeKey(whispersConfig.fallbackChannel) or defaultChannelId
 	if whisperFallbackChannelId == 'whispers' or not channelById[whisperFallbackChannelId] then
 		whisperFallbackChannelId = defaultChannelId
 	end
 
-	if not whisperTabEnabled then
+	if not whisperChannelEnabled then
 		local whispersChannel = channelById.whispers
 		if whispersChannel then
 			whispersChannel.visible = false
@@ -797,7 +890,7 @@ local function setupBootstrap()
 		end
 	end
 
-	if not whisperTabEnabled and defaultChannelId == 'whispers' then
+	if not whisperChannelEnabled and defaultChannelId == 'whispers' then
 		defaultChannelId = whisperFallbackChannelId
 	end
 
@@ -808,7 +901,7 @@ local function setupBootstrap()
 	end
 
 	local commandRoutingOverrides = buildRoutingOverrides(routingConfig.overrides, channelById)
-	if not whisperTabEnabled then
+	if not whisperChannelEnabled then
 		local whisperRoutingKeys = {'whisper', 'dm', 'msg', 'reply', 'r'}
 		for i = 1, #whisperRoutingKeys do
 			commandRoutingOverrides[whisperRoutingKeys[i]] = whisperFallbackChannelId
@@ -824,6 +917,12 @@ local function setupBootstrap()
 	local commandResponseWindowMs = math.max(100, tonumber(routingConfig.responseWindowMs) or 1500)
 
 	local whisperSidebar = type(whispersConfig.sidebar) == 'table' and whispersConfig.sidebar or {}
+	local whisperPlayerListEnabled = whispersConfig.playerListEnabled
+	if whisperPlayerListEnabled == nil then
+		whisperPlayerListEnabled = whisperSidebar.enabled ~= false
+	else
+		whisperPlayerListEnabled = whisperPlayerListEnabled == true
+	end
 	local whisperLegacyNotification = type(whispersConfig.notification) == 'table' and whispersConfig.notification or {}
 
 	local notificationDefaultRaw = type(notificationsConfig.default) == 'table' and notificationsConfig.default or {}
@@ -867,6 +966,23 @@ local function setupBootstrap()
 		voiceFallbackLocalDistance = tonumber(((channelsConfig["local"] or {}).distance)) or 50.0
 	end
 
+	local inboundMessageRules = buildInboundMessageRules(routingConfig.inboundMessageRules, channelById)
+	local radioIntegrationConfig = type(integrationsConfig.radio) == 'table' and integrationsConfig.radio or {}
+	local radioIntegrationEnabled = radioIntegrationConfig.enabled == true
+	local radioIntegrationResource = tostring(radioIntegrationConfig.resource or '7-radio')
+	local radioIntegrationChannelId = normalizeKey(radioIntegrationConfig.channelId) or 'radio'
+	local radioIntegrationFallbackChannelId = normalizeKey(radioIntegrationConfig.fallbackChannel) or defaultChannelId
+	if not channelById[radioIntegrationChannelId] then
+		if channelById.radio then
+			radioIntegrationChannelId = 'radio'
+		else
+			radioIntegrationEnabled = false
+		end
+	end
+	if radioIntegrationFallbackChannelId == radioIntegrationChannelId or not channelById[radioIntegrationFallbackChannelId] then
+		radioIntegrationFallbackChannelId = defaultChannelId
+	end
+
 	local voiceIntermediateColors = collectVoiceIntermediateColors(voiceColorConfig)
 
 	Client.config = {
@@ -879,6 +995,7 @@ local function setupBootstrap()
 		voice = voiceConfig,
 		runtime = clientRuntime,
 		access = accessConfig,
+		integrations = integrationsConfig,
 		channels = channelsConfig,
 		commands = commandsConfig,
 		commandRouting = routingConfig,
@@ -896,13 +1013,17 @@ local function setupBootstrap()
 		commandByKey = commandByKey,
 		commandNameToKey = commandNameToKey,
 		commandRoutingOverrides = commandRoutingOverrides,
+		inboundMessageRules = inboundMessageRules,
 		commandResponseWindowMs = commandResponseWindowMs,
 		whisperTabEnabled = whisperTabEnabled,
+		whisperChannelEnabled = whisperChannelEnabled,
 		whisperFallbackChannelId = whisperFallbackChannelId,
 		separateChannelTabs = separateChannelTabs,
 		singleChannelId = singleChannelId,
 		autoScrollDefault = uiConfig.autoScrollDefault ~= false,
 		defaultTabGrouping = defaultTabGrouping,
+		tabGroupRelayTargetByChannel = tabGroupRelayTargetByChannel,
+		tabPinnedByChannel = tabPinnedByChannel,
 		notificationDefaultProfile = notificationDefaultProfile,
 		notificationByChannel = notificationByChannel,
 		whisperNotificationDefaultEnabled = whisperNotificationProfile.enabled ~= false,
@@ -918,11 +1039,18 @@ local function setupBootstrap()
 		voiceColorIntermediate = voiceIntermediateColors,
 		voiceColorMax = tostring(voiceColorConfig.colorMax or '#e74c3c'),
 		voicePollRate = math.max(100, tonumber(voiceConfig.pollRate) or 250),
+		radioIntegrationEnabled = radioIntegrationEnabled,
+		radioIntegrationResource = radioIntegrationResource,
+		radioIntegrationChannelId = radioIntegrationChannelId,
+		radioIntegrationFallbackChannelId = radioIntegrationFallbackChannelId,
+		whisperSidebarEnabled = whisperChannelEnabled == true,
 		whisperSidebarCollapsible = whisperSidebar.collapsible ~= false,
 		whisperSidebarDefaultCollapsed = whisperSidebar.defaultCollapsed == true,
+		whisperPlayerListEnabled = whisperPlayerListEnabled == true,
+		whisperSidebarShowPlayerMeta = whisperSidebar.showPlayerMeta ~= false,
 		chatOpenControl = tonumber(clientRuntime.chatOpenControl) or 245,
 		suggestionBatchSize = math.max(1, tonumber(clientRuntime.suggestionBatchSize) or 200),
-		mainLoopIdleMs = math.max(0, tonumber(clientRuntime.mainLoopIdleMs) or 0),
+		mainLoopIdleMs = math.max(50, tonumber(clientRuntime.mainLoopIdleMs) or 50),
 		overheadIdleMs = math.max(1, tonumber(clientRuntime.overheadIdleMs) or 250),
 		resourceRefreshDelayMs = math.max(0, tonumber(clientRuntime.resourceRefreshDelayMs) or 500),
 		pmaStartDelayMs = math.max(0, tonumber(clientRuntime.pmaStartDelayMs) or 300)
@@ -933,6 +1061,7 @@ local function setupBootstrap()
 		chatInputActivating = false,
 		chatHidden = true,
 		chatLoaded = false,
+		PendingUiMessages = {},
 		Channel = defaultChannelId,
 		HideChat = false,
 		MutedPlayers = {},
@@ -947,7 +1076,19 @@ local function setupBootstrap()
 		LastCommandContext = nil,
 		Permissions = {
 			canAccessStaffChannel = false,
-			channels = {}
+			channels = {},
+			moderation = {
+				canAccessStaff = false,
+				canDeleteMessages = false,
+				canViewDeletedMessages = false,
+				builtInReportsEnabled = true
+			}
+		},
+		CommandPolicy = {
+			blocks = {},
+			routes = {},
+			customCommands = {},
+			registry = {}
 		},
 		typingSystemEnabled = typingConfig.enabled == true,
 		typingToggleAllowed = typingConfig.enabled == true and typingConfig.allowPlayerToggle == true,
@@ -963,6 +1104,10 @@ local function setupBootstrap()
 		autoScrollToggleAllowed = true,
 		autoScrollEnabled = uiConfig.autoScrollDefault ~= false,
 		TabGrouping = defaultTabGroupingState,
+		TabGroupOrder = {},
+		TabGroupNames = {},
+		TabGroupDisplayMode = {},
+		HiddenTabButtons = {},
 		TabNotificationToggles = {},
 		distanceEnabled = voiceConfig.enabled == true,
 		voiceAvailable = false,
@@ -972,6 +1117,7 @@ local function setupBootstrap()
 		voiceErrorShown = false,
 		distanceModeCount = nil,
 		distanceLastPayload = nil,
+		distanceLastSyncedValue = nil,
 		distanceState = {
 			enabled = false,
 			value = voiceFallbackLocalDistance,
@@ -981,6 +1127,31 @@ local function setupBootstrap()
 			modeIndex = nil,
 			modeCount = nil,
 			ranges = {}
+		},
+		RadioIntegration = {
+			enabled = radioIntegrationEnabled == true,
+			available = false,
+			resource = radioIntegrationResource,
+			channelId = radioIntegrationChannelId,
+			active = 'primary',
+			relayLocked = false,
+			slots = {
+				primary = {
+					slot = 'primary',
+					frequency = nil,
+					label = '',
+					color = nil,
+					relay = false
+				},
+				secondary = {
+					slot = 'secondary',
+					frequency = nil,
+					label = '',
+					color = nil,
+					relay = false
+				}
+			},
+			historyByFrequency = {}
 		},
 		emojiAliasesByGlyph = {},
 		emojiEntries = {},
@@ -997,12 +1168,14 @@ local function setupBootstrap()
 	local staffChannel = channelById.staff or {}
 	local whisperChannel = channelById.whispers or {}
 	state.ActionMessageColor = normalizeRgbColor(actionMessageConfig.color, {200, 0, 255})
+	state.SceneMessageColor = normalizeRgbColor(sceneMessageConfig.color, {143, 199, 255})
 	state.LocalMessageColor = normalizeRgbColor(localChannel.color, {0, 153, 204})
 	state.GlobalMessageColor = normalizeRgbColor(globalChannel.color, {212, 175, 55})
 	state.StaffMessageColor = normalizeRgbColor(staffChannel.color, {255, 64, 0})
 	state.WhisperColor = normalizeRgbColor(whisperChannel.color, {254, 127, 156})
 	state.WhisperEchoColor = normalizeRgbColor(messagesConfig.whisperOutgoingColor, {204, 77, 106})
 	state.ActionMessageDistance = tonumber(actionMessageConfig.distance) or 50.0
+	state.SceneMessageDistance = tonumber(sceneMessageConfig.distance) or state.ActionMessageDistance
 	state.LocalMessageDistance = voiceFallbackLocalDistance
 
 	IsInProximity = isInProximity

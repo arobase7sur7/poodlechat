@@ -31,15 +31,20 @@ local function registerNetEvents()
 		'poodlechat:staffMessage',
 		'poodlechat:globalMessage',
 		'poodlechat:actionMessage',
+		'poodlechat:sceneMessage',
+		'poodlechat:clearHistory',
 		'poodlechat:whisperMessage',
 		'poodlechat:getWhisperTargets',
 		'poodlechat:getPermissions',
+		'poodlechat:voiceDistanceState',
 		'poodlechat:report',
+		'poodlechat:deleteMessage',
 		'poodlechat:mute',
 		'poodlechat:unmute',
 		'poodlechat:showMuted',
 		'poodlechat:typingState',
-		'poodlechat:bubbleMessage'
+		'poodlechat:bubbleMessage',
+		'poodlechat:manager:request'
 	}
 
 	for i = 1, #serverEvents do
@@ -51,10 +56,16 @@ local function registerNetEvents()
 	end
 end
 
+safeCall('setupRuntimeConfig', Server.setupRuntimeConfig)
 safeCall('setupBootstrap', Server.setupBootstrap)
+safeCall('setupAudit', Server.setupAudit)
+safeCall('setupPermissions', Server.setupPermissions)
 safeCall('registerNetEvents', registerNetEvents)
 safeCall('registerNicknameCommand', Server.registerNicknameCommand)
 safeCall('initializeEmoji', Server.initializeEmoji)
+safeCall('setupCommandsRuntime', Server.setupCommandsRuntime)
 safeCall('registerChatHandlers', Server.registerChatHandlers)
 safeCall('registerModerationHandlers', Server.registerModerationHandlers)
+safeCall('setupAutoMessages', Server.setupAutoMessages)
+safeCall('setupManager', Server.setupManager)
 

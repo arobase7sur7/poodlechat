@@ -11,6 +11,18 @@ local refreshDistanceState = nil
 local isTabSoundEnabled = nil
 local hasAnyUnmutedNotificationTab = nil
 local getNotificationToggleState = nil
+local pmaVoiceModesCache = nil
+local nextPmaSettingsAttemptAt = 0
+-- Note: config colors can be 8-char ARGB hex (e.g. 'FFDB397D');
+-- the normalizeHexColor helper strips the leading 2 alpha chars automatically.
+local pmaSettingsWarningShown = false
+local voiceRangeDisplayUntil = 0
+local voiceRangeDisplayStart = 0
+local voiceRangeDisplayDuration = 2000
+local voiceRangeCurrent = nil
+local voiceRangeMode = nil
+local voiceRangeThreadStarted = false
+local voiceColorAnchors = nil
 
 local function ensureContext()
 	if State and config and constants then
@@ -218,27 +230,135 @@ local function parseVoiceModeEntry(rawEntry, fallbackIndex)
 	}
 end
 
-local function refreshVoiceModesFromPma()
-	local modes = {}
-
-	if not State.distanceEnabled or not isVoiceResourceStarted() then
-		State.voiceModes = modes
-		State.voiceModeLabels = {}
-		return
+local function cloneVoiceModes(source)
+	local cloned = {}
+	if type(source) ~= 'table' then
+		return cloned
 	end
 
-	local captured = nil
-	TriggerEvent('pma-voice:settingsCallback', function(settings)
-		captured = settings
-	end)
+	for i = 1, #source do
+		local entry = source[i]
+		if type(entry) == 'table' then
+			cloned[#cloned + 1] = {
+				index = tonumber(entry.index) or i,
+				label = tostring(entry.label or ('Mode ' .. i)),
+				range = tonumber(entry.range) or 0.0
+			}
+		end
+	end
 
-	local rawModes = captured and captured.voiceModes
-	if type(rawModes) == 'table' then
+	return cloned
+end
+
+local function parseVoiceModes(rawModes)
+	local modes = {}
+	if type(rawModes) ~= 'table' then
+		return modes
+	end
+
+	if #rawModes > 0 then
 		for i = 1, #rawModes do
 			local parsed = parseVoiceModeEntry(rawModes[i], i)
 			if parsed then
 				modes[#modes + 1] = parsed
 			end
+		end
+	else
+		local keys = {}
+		for key in pairs(rawModes) do
+			if type(key) == 'number' then
+				keys[#keys + 1] = key
+			end
+		end
+
+		table.sort(keys)
+
+		for i = 1, #keys do
+			local parsed = parseVoiceModeEntry(rawModes[keys[i]], i)
+			if parsed then
+				modes[#modes + 1] = parsed
+			end
+		end
+	end
+
+	table.sort(modes, function(a, b)
+		return (tonumber(a.index) or 0) < (tonumber(b.index) or 0)
+	end)
+
+	return modes
+end
+
+local function getConfiguredFallbackVoiceModes()
+	local configuredModes = nil
+
+	if type(voiceConfig.fallbackModes) == 'table' then
+		configuredModes = voiceConfig.fallbackModes
+	elseif type(voiceConfig.modes) == 'table' then
+		configuredModes = voiceConfig.modes
+	elseif type(voiceConfig.voiceModes) == 'table' then
+		configuredModes = voiceConfig.voiceModes
+	end
+
+	return parseVoiceModes(configuredModes)
+end
+
+local function getPmaSettingsRefreshMs()
+	return math.max(2000, tonumber(voiceConfig.pmaSettingsRefreshMs) or 10000)
+end
+
+local function getPmaSettingsRetryMs()
+	return math.max(5000, tonumber(voiceConfig.pmaSettingsRetryMs) or 30000)
+end
+
+local function refreshVoiceModesFromPma(forceRefresh)
+	local modes = {}
+
+	if not State.distanceEnabled or not isVoiceResourceStarted() then
+		pmaVoiceModesCache = nil
+		nextPmaSettingsAttemptAt = 0
+		pmaSettingsWarningShown = false
+		State.voiceModes = modes
+		State.voiceModeLabels = {}
+		return
+	end
+
+	local now = GetGameTimer()
+	local canPollPma = forceRefresh == true or now >= nextPmaSettingsAttemptAt
+
+	if canPollPma then
+		local captured = nil
+		local ok, err = pcall(function()
+			TriggerEvent('pma-voice:settingsCallback', function(settings)
+				captured = settings
+			end)
+		end)
+
+		local parsedFromPma = parseVoiceModes(captured and captured.voiceModes)
+		if #parsedFromPma > 0 then
+			pmaVoiceModesCache = parsedFromPma
+			modes = cloneVoiceModes(parsedFromPma)
+			if ok then
+				nextPmaSettingsAttemptAt = now + getPmaSettingsRefreshMs()
+				pmaSettingsWarningShown = false
+			else
+				nextPmaSettingsAttemptAt = now + getPmaSettingsRetryMs()
+			end
+		else
+			nextPmaSettingsAttemptAt = now + getPmaSettingsRetryMs()
+		end
+
+		if not ok and not pmaSettingsWarningShown then
+			pmaSettingsWarningShown = true
+			print(('[poodlechat] pma-voice settings callback failed (%s); using fallback voice modes.'):format(tostring(err)))
+		end
+	elseif type(pmaVoiceModesCache) == 'table' and #pmaVoiceModesCache > 0 then
+		modes = cloneVoiceModes(pmaVoiceModesCache)
+	end
+
+	if #modes == 0 then
+		local configuredModes = getConfiguredFallbackVoiceModes()
+		if #configuredModes > 0 then
+			modes = configuredModes
 		end
 	end
 
@@ -253,6 +373,15 @@ local function refreshVoiceModesFromPma()
 				range = distance
 			}
 		end
+	end
+
+	if #modes == 0 then
+		local fallbackDistance = tonumber(constants.voiceFallbackLocalDistance) or tonumber(State.LocalMessageDistance) or 10.0
+		modes[1] = {
+			index = 1,
+			label = string.format('%.1f m', fallbackDistance),
+			range = fallbackDistance
+		}
 	end
 
 	table.sort(modes, function(a, b)
@@ -351,6 +480,9 @@ end
 
 local function refreshVoiceAvailability(announceMissing)
 	if not State.distanceEnabled then
+		pmaVoiceModesCache = nil
+		nextPmaSettingsAttemptAt = 0
+		pmaSettingsWarningShown = false
 		State.voiceAvailable = false
 		State.voiceModes = {}
 		State.voiceModeLabels = {}
@@ -362,6 +494,9 @@ local function refreshVoiceAvailability(announceMissing)
 
 	State.voiceAvailable = isVoiceResourceStarted()
 	if not State.voiceAvailable then
+		pmaVoiceModesCache = nil
+		nextPmaSettingsAttemptAt = 0
+		pmaSettingsWarningShown = false
 		State.voiceModes = {}
 		State.voiceModeLabels = {}
 		State.voiceLevelColors = {}
@@ -375,7 +510,7 @@ local function refreshVoiceAvailability(announceMissing)
 	end
 
 	State.voiceErrorShown = false
-	refreshVoiceModesFromPma()
+	refreshVoiceModesFromPma(true)
 	State.distanceModeCount = math.max(1, #State.voiceModes)
 	State.voiceLevelColors = buildVoiceLevelColors(State.distanceModeCount)
 	refreshDistanceState(true)
@@ -435,6 +570,39 @@ local function createDistancePayload()
 	}
 end
 
+function Client.getVoiceColorForDistance(distance)
+	if not State.distanceEnabled or State.voiceAvailable ~= true then
+		return nil
+	end
+	if not State.voiceLevelColors or #State.voiceLevelColors == 0 then
+		return nil
+	end
+
+	local dist = tonumber(distance)
+	if not dist or dist <= 0 then
+		return nil
+	end
+
+	local ranges = getDistanceRangesList()
+	local modeIndex = 1
+	if #ranges > 0 then
+		for i = 1, #ranges do
+			if dist <= ranges[i] + 0.1 then
+				modeIndex = i
+				break
+			end
+			modeIndex = i
+		end
+	end
+
+	local modeCount = tonumber(State.distanceModeCount) or 1
+	modeIndex = Client.clamp(modeIndex, 1, modeCount)
+
+	local hex = State.voiceLevelColors[modeIndex]
+	if not hex then return nil end
+	return hexColorToRgb(hex)
+end
+
 local function isSameDistancePayload(a, b)
 	if not a or not b then
 		return false
@@ -480,10 +648,36 @@ local function isSameDistancePayload(a, b)
 	return true
 end
 
+local function syncLocalVoiceDistance(payload, force)
+	local fallbackDistance = tonumber(constants.voiceFallbackLocalDistance) or tonumber(State.LocalMessageDistance) or 10.0
+	local currentDistance = payload and payload.enabled == true and tonumber(payload.value) or nil
+
+	State.LocalMessageDistance = currentDistance or fallbackDistance
+
+	if currentDistance and currentDistance > 0 then
+		local lastSynced = tonumber(State.distanceLastSyncedValue)
+		if force or not lastSynced or math.abs(lastSynced - currentDistance) > 0.001 then
+			State.distanceLastSyncedValue = currentDistance
+			TriggerServerEvent('poodlechat:voiceDistanceState', {
+				distance = currentDistance
+			})
+		end
+		return
+	end
+
+	if State.distanceLastSyncedValue ~= false then
+		State.distanceLastSyncedValue = false
+		TriggerServerEvent('poodlechat:voiceDistanceState', {
+			distance = false
+		})
+	end
+end
+
 refreshDistanceState = function(force)
 	local payload = createDistancePayload()
 
 	State.distanceState = payload
+	syncLocalVoiceDistance(payload, force)
 
 	if force or not isSameDistancePayload(payload, State.distanceLastPayload) then
 		State.distanceLastPayload = payload
@@ -509,15 +703,142 @@ local function cycleDistance()
 	if not State.distanceEnabled or State.voiceAvailable ~= true then
 		return false
 	end
-
+	
 	local ok = pcall(ExecuteCommand, 'cycleproximity')
 	if ok then
 		Wait(0)
 		refreshDistanceModeCount()
 		refreshDistanceState(true)
+
+	end
+	return ok
+
+end
+
+local function lerp(a, b, t)
+	return a + (b - a) * t
+end
+
+local function getVoiceColorForStep(step, totalSteps)
+	if not voiceColorAnchors or #voiceColorAnchors == 0 then
+		return 46, 133, 204
 	end
 
-	return ok
+	if #voiceColorAnchors == 1 then
+		local single = voiceColorAnchors[1]
+		return single[1] or 46, single[2] or 133, single[3] or 204
+	end
+
+	totalSteps = tonumber(totalSteps) or 1
+	step = tonumber(step) or 1
+
+	if totalSteps <= 1 then
+		local first = voiceColorAnchors[1]
+		return first[1] or 46, first[2] or 133, first[3] or 204
+	end
+
+	local progress = (step - 1) / (totalSteps - 1)
+	if progress < 0.0 then progress = 0.0 end
+	if progress > 1.0 then progress = 1.0 end
+
+	local segmentCount = #voiceColorAnchors - 1
+	local scaled = progress * segmentCount
+	local index = math.floor(scaled) + 1
+
+	if index >= #voiceColorAnchors then
+		local last = voiceColorAnchors[#voiceColorAnchors]
+		return last[1] or 231, last[2] or 76, last[3] or 60
+	end
+
+	local localT = scaled - math.floor(scaled)
+	local c1 = voiceColorAnchors[index]
+	local c2 = voiceColorAnchors[index + 1]
+
+	local r = math.floor(lerp(c1[1] or 0, c2[1] or 0, localT) + 0.5)
+	local g = math.floor(lerp(c1[2] or 0, c2[2] or 0, localT) + 0.5)
+	local b = math.floor(lerp(c1[3] or 0, c2[3] or 0, localT) + 0.5)
+
+	return r, g, b
+end
+
+local function startVoiceRangeDisplayThread()
+	if voiceRangeThreadStarted then
+		return
+	end
+
+	voiceRangeThreadStarted = true
+
+	CreateThread(function()
+		while true do
+			local now = GetGameTimer()
+
+			if voiceRangeCurrent and now < voiceRangeDisplayUntil then
+				Wait(0)
+
+				local ped = PlayerPedId()
+				if DoesEntityExist(ped) then
+					local coords = GetEntityCoords(ped)
+					local progress = (now - voiceRangeDisplayStart) / voiceRangeDisplayDuration
+					if progress < 0.0 then progress = 0.0 end
+					if progress > 1.0 then progress = 1.0 end
+
+					local pulse = 1.0 + (math.sin(now / 140) * 0.04)
+					local alpha = math.floor(90 * (1.0 - progress))
+
+					local totalModes = tonumber(State.distanceModeCount) or #(State.voiceModes or {})
+					local r, g, b = getVoiceColorForStep(voiceRangeMode or 1, totalModes)
+
+					local size = voiceRangeCurrent * 2.0 * pulse
+
+					DrawMarker(
+						28,
+						coords.x, coords.y, coords.z,
+						0.0, 0.0, 0.0,
+						0.0, 0.0, 0.0,
+						size, size, size,
+						r, g, b, alpha,
+						false, false, 2, false, nil, nil, false
+					)
+				end
+			else
+				Wait(200)
+			end
+		end
+	end)
+end
+
+local function showVoiceRangeBubble(mode)
+
+	if not voiceConfig.showRangeBubble then
+		return
+	end
+
+	if State.distanceEnabled ~= true or State.voiceAvailable ~= true then
+		return
+	end
+
+	local range = nil
+
+	if State.voiceModes and State.voiceModes[mode] then
+		local modeData = State.voiceModes[mode]
+
+		if type(modeData) == 'table' then
+			range = tonumber(modeData[1] or modeData.distance or modeData.range)
+		else
+			range = tonumber(modeData)
+		end
+	end
+
+	if not range or range <= 0 then
+		return
+	end
+
+	voiceRangeMode = tonumber(mode) or voiceRangeMode
+	voiceRangeCurrent = range
+	voiceRangeDisplayStart = GetGameTimer()
+	voiceRangeDisplayUntil = voiceRangeDisplayStart + voiceRangeDisplayDuration
+
+	startVoiceRangeDisplayThread()
 end
 
 hasAnyUnmutedNotificationTab = function()
@@ -597,6 +918,52 @@ local function getPlayerPedFromServerId(serverId)
 	end
 
 	return ped
+end
+
+local function resolveSenderVoiceDistance(serverId, fallbackDistance)
+	local resolvedDistance = tonumber(fallbackDistance)
+	if resolvedDistance and resolvedDistance > 0 then
+		return resolvedDistance
+	end
+
+	local sourceNumber = tonumber(serverId)
+	if sourceNumber then
+		local playerId = GetPlayerFromServerId(sourceNumber)
+		if playerId ~= -1 then
+			local player = Player(playerId)
+			if player and type(player.state) == 'table' and type(player.state.proximity) == 'table' then
+				local remoteDistance = tonumber(player.state.proximity.distance)
+				if remoteDistance and remoteDistance > 0 then
+					return remoteDistance
+				end
+			end
+		end
+	end
+
+	local localProximity = getLocalProximityState()
+	if type(localProximity) == 'table' then
+		local localDistance = tonumber(localProximity.distance)
+		if localDistance and localDistance > 0 then
+			return localDistance
+		end
+	end
+
+	return nil
+end
+
+function Client.getVoiceColorForLocalMessage(serverId, senderDistance)
+	if not State.distanceEnabled or State.voiceAvailable ~= true then
+		return nil
+	end
+	if not voiceColorAnchors or #voiceColorAnchors == 0 then
+		return nil
+	end
+
+	local maxDistance = resolveSenderVoiceDistance(serverId, senderDistance)
+	if not maxDistance or maxDistance <= 0 then
+		return nil
+	end
+	return Client.getVoiceColorForDistance(maxDistance)
 end
 
 local function getPedScreenCoord(serverId, offset, maxDistance, myCoords, style)
@@ -771,7 +1138,7 @@ local function setTypingOverhead(serverId, active)
 	})
 end
 
-local function displayBubbleMessage(serverId, text)
+local function displayBubbleMessage(serverId, text, resolvedDistance)
 	if not State.bubbleSystemEnabled or not State.bubbleDisplayEnabled then
 		return
 	end
@@ -782,7 +1149,10 @@ local function displayBubbleMessage(serverId, text)
 
 	local maxLength = math.max(1, tonumber(bubbleConfig.maxLength) or 80)
 	local fadeOutTime = math.max(100, tonumber(bubbleConfig.fadeOutTime) or 4000)
-	local maxDistance = tonumber(bubbleConfig.maxDistance) or State.LocalMessageDistance
+	local maxDistance = tonumber(resolvedDistance)
+	if not maxDistance or maxDistance <= 0 then
+		maxDistance = tonumber(bubbleConfig.maxDistance) or State.LocalMessageDistance
+	end
 	local clipped = tostring(text or '')
 	local sourceKey = tostring(tonumber(serverId) or serverId)
 	local baseOffset = Client.getOffset(bubbleConfig.offset, vector3(0.0, 0.0, 1.1))
@@ -1053,6 +1423,8 @@ local function registerFeatureHandlers()
 		return
 	end
 
+	voiceColorAnchors = buildVoiceColorAnchors()
+
 	AddEventHandler('poodlechat:typingState', function(sourceId, active)
 		if not State.typingSystemEnabled then
 			return
@@ -1076,7 +1448,7 @@ local function registerFeatureHandlers()
 		setTypingOverhead(sourceId, enabled)
 	end)
 
-	AddEventHandler('poodlechat:bubbleMessage', function(sourceId, message)
+	AddEventHandler('poodlechat:bubbleMessage', function(sourceId, message, resolvedDistance)
 		removeOverheadMessage('typing-' .. tostring(sourceId))
 		State.typingRemoteStates[tostring(sourceId)] = false
 
@@ -1084,11 +1456,16 @@ local function registerFeatureHandlers()
 			return
 		end
 
-		if not Client.isInProximity(sourceId, tonumber(bubbleConfig.maxDistance) or State.LocalMessageDistance) then
+		local maxDistance = tonumber(resolvedDistance)
+		if not maxDistance or maxDistance <= 0 then
+			maxDistance = tonumber(bubbleConfig.maxDistance) or State.LocalMessageDistance
+		end
+
+		if not Client.isInProximity(sourceId, maxDistance) then
 			return
 		end
 
-		displayBubbleMessage(sourceId, message)
+		displayBubbleMessage(sourceId, message, maxDistance)
 	end)
 
 	CreateThread(function()
@@ -1172,6 +1549,9 @@ local function registerFeatureHandlers()
 			return
 		end
 
+		pmaVoiceModesCache = nil
+		nextPmaSettingsAttemptAt = 0
+		pmaSettingsWarningShown = false
 		State.voiceAvailable = false
 		State.voiceModes = {}
 		State.voiceModeLabels = {}
@@ -1181,10 +1561,11 @@ local function registerFeatureHandlers()
 		sendFeatureState()
 	end)
 
-	AddEventHandler('pma-voice:setTalkingMode', function()
+	AddEventHandler('pma-voice:setTalkingMode', function(mode)
 		if State.distanceEnabled and State.voiceAvailable == true then
 			refreshDistanceModeCount()
 			refreshDistanceState(true)
+			showVoiceRangeBubble(mode)
 		end
 	end)
 
@@ -1202,6 +1583,24 @@ local function registerFeatureHandlers()
 			refreshDistanceModeCount()
 		end)
 	end
+
+	-- When pma-voice restarts mid-session, clear the settings cache so the
+	-- next poll re-syncs voice modes instead of using stale data.
+	local voiceRes = tostring(constants.voiceResourceName or 'pma-voice')
+	AddEventHandler('onResourceStart', function(resourceName)
+		if resourceName ~= voiceRes then
+			return
+		end
+		pmaVoiceModesCache = nil
+		nextPmaSettingsAttemptAt = 0
+		pmaSettingsWarningShown = false
+		-- Give pma-voice a moment to fully initialize before re-polling
+		SetTimeout(tonumber(constants.pmaStartDelayMs) or 500, function()
+			if State.distanceEnabled then
+				refreshVoiceAvailability(false)
+			end
+		end)
+	end)
 
 	handlersRegistered = true
 end
@@ -1227,4 +1626,3 @@ Client.setTypingDisplayEnabled = setTypingDisplayEnabled
 Client.setBubbleDisplayEnabled = setBubbleDisplayEnabled
 Client.refreshVoiceAvailability = refreshVoiceAvailability
 Client.registerFeatureHandlers = registerFeatureHandlers
-

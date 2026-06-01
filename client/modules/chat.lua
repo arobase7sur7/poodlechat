@@ -4,8 +4,65 @@ local config = nil
 local constants = nil
 local handlersRegistered = false
 local tabGroupingKvpKey = 'poodlechat:tabGrouping:v1'
+local tabGroupOrderKvpKey = 'poodlechat:tabGroupOrder:v1'
+local tabGroupNamesKvpKey = 'poodlechat:tabGroupNames:v1'
+local tabGroupDisplayModeKvpKey = 'poodlechat:tabGroupDisplayMode:v1'
+local hiddenTabButtonsKvpKey = 'poodlechat:hiddenTabs:v1'
 local tabNotificationKvpKey = 'poodlechat:tabNotifications:v1'
 local notificationSoundKvpKey = 'poodlechat:notificationSound:v1'
+local embeddedRadioRefreshWorkerRunning = false
+local embeddedRadioRefreshDelayMs = 700
+local embeddedRadioRefreshMaxAttempts = 40
+local clearHistoryConfirmUntil = 0
+
+local function normalizeResourceKey(resourceName)
+	local value = tostring(resourceName or ''):gsub('^%s+', ''):gsub('%s+$', ''):lower()
+	if value == '' then
+		return nil
+	end
+
+	return value:gsub('[^%w]', '')
+end
+
+local function resolveResourceName(resourceName)
+	local configured = tostring(resourceName or ''):gsub('^%s+', ''):gsub('%s+$', '')
+	if configured == '' then
+		return nil
+	end
+
+	local directState = GetResourceState(configured)
+	if directState and directState ~= 'missing' and directState ~= 'unknown' then
+		return configured
+	end
+
+	if type(GetNumResources) ~= 'function' or type(GetResourceByFindIndex) ~= 'function' then
+		return configured
+	end
+
+	local expectedKey = normalizeResourceKey(configured)
+	if not expectedKey then
+		return configured
+	end
+
+	local fallback = nil
+	for resourceIndex = 0, GetNumResources() - 1 do
+		local candidate = GetResourceByFindIndex(resourceIndex)
+		if type(candidate) == 'string' and candidate ~= '' then
+			local candidateKey = normalizeResourceKey(candidate)
+			if candidateKey == expectedKey then
+				local state = GetResourceState(candidate)
+				if state == 'started' or state == 'starting' then
+					return candidate
+				end
+				if not fallback then
+					fallback = candidate
+				end
+			end
+		end
+	end
+
+	return fallback or configured
+end
 
 local function ensureContext()
 	if State and config and constants then
@@ -223,6 +280,142 @@ local function resolveChannelWithFallback(channelId)
 	return normalized
 end
 
+local function normalizeInboundText(value)
+	return tostring(value or ''):gsub('^%s+', ''):gsub('%s+$', '')
+end
+
+local function getInboundPrimaryText(raw)
+	local args = type(raw.args) == 'table' and raw.args or nil
+	if args and args[1] ~= nil then
+		return normalizeInboundText(args[1])
+	end
+
+	return normalizeInboundText(raw.text or raw.message or '')
+end
+
+local function matchesInboundRule(rule, raw)
+	if type(rule) ~= 'table' then
+		return false
+	end
+
+	local label = Client.normalizeKey(normalizeInboundText(raw.label))
+	local primaryText = getInboundPrimaryText(raw)
+	local primaryLower = string.lower(primaryText)
+	local templateText = tostring(raw.template or '')
+	local templateLower = string.lower(templateText)
+
+	local labels = type(rule.labels) == 'table' and rule.labels or {}
+	for i = 1, #labels do
+		local matchLabel = Client.normalizeKey(labels[i])
+		if matchLabel and label and label == matchLabel then
+			return true
+		end
+	end
+
+	local prefixes = type(rule.prefixes) == 'table' and rule.prefixes or {}
+	for i = 1, #prefixes do
+		local prefix = normalizeInboundText(prefixes[i])
+		if prefix ~= '' and primaryLower:sub(1, #prefix) == string.lower(prefix) then
+			return true
+		end
+	end
+
+	local pattern = type(rule.pattern) == 'string' and rule.pattern or nil
+	if pattern and pattern ~= '' then
+		local ok, matched = pcall(string.find, primaryText, pattern)
+		if ok and matched then
+			return true
+		end
+	end
+
+	local templateContains = type(rule.templateContains) == 'table' and rule.templateContains or {}
+	for i = 1, #templateContains do
+		local fragment = normalizeInboundText(templateContains[i])
+		if fragment ~= '' and string.find(templateLower, string.lower(fragment), 1, true) then
+			return true
+		end
+	end
+
+	local templatePattern = type(rule.templatePattern) == 'string' and rule.templatePattern or nil
+	if templatePattern and templatePattern ~= '' then
+		local ok, matched = pcall(string.find, templateText, templatePattern)
+		if ok and matched then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function shouldUseLegacyCommandContextFallback(raw)
+	if type(raw) ~= 'table' then
+		return false
+	end
+
+	if raw.channel ~= nil then
+		return false
+	end
+
+	if raw.template ~= nil then
+		return false
+	end
+
+	local metadata = type(raw.metadata) == 'table' and raw.metadata or nil
+	if metadata and next(metadata) ~= nil then
+		return false
+	end
+
+	local label = normalizeInboundText(raw.label)
+	if label ~= '' then
+		return false
+	end
+
+	local args = type(raw.args) == 'table' and raw.args or nil
+	if args then
+		if #args ~= 1 then
+			return false
+		end
+
+		local onlyArg = normalizeInboundText(args[1])
+		if onlyArg == '' or onlyArg:sub(1, 1) == '[' then
+			return false
+		end
+
+		return true
+	end
+
+	local text = normalizeInboundText(raw.text or raw.message or '')
+	if text == '' or text:sub(1, 1) == '[' then
+		return false
+	end
+
+	return true
+end
+
+local function resolveInboundMessageChannel(raw)
+	local channelId = Client.normalizeKey(raw.channel)
+	if channelId and constants.channelById[channelId] then
+		return channelId
+	end
+
+	local inboundRules = type(constants.inboundMessageRules) == 'table' and constants.inboundMessageRules or {}
+	for i = 1, #inboundRules do
+		local rule = inboundRules[i]
+		if matchesInboundRule(rule, raw) then
+			return rule.channel
+		end
+	end
+
+	if shouldUseLegacyCommandContextFallback(raw) then
+		local legacyChannelId = Client.getActiveCommandContextChannel()
+		if legacyChannelId and constants.channelById[legacyChannelId] then
+			return legacyChannelId
+		end
+	end
+
+	return constants.defaultChannelId
+end
+
 local function normalizeLimit(value, fallback)
 	local number = tonumber(value)
 	if number == nil then
@@ -242,6 +435,77 @@ local function normalizeLimit(value, fallback)
 	end
 
 	return number
+end
+
+local function canChannelReceiveGroupedChannels(channelId)
+	local id = Client.normalizeKey(channelId)
+	if not id then
+		return false
+	end
+
+	local relayTargets = type(constants.tabGroupRelayTargetByChannel) == 'table' and constants.tabGroupRelayTargetByChannel or {}
+	if relayTargets[id] == nil then
+		return true
+	end
+
+	return relayTargets[id] == true
+end
+
+local function assignRelayTargetGrouping(provisional)
+	local membersByGroup = {}
+	for i = 1, #constants.channelList do
+		local channelId = constants.channelList[i].id
+		local groupId = tonumber(provisional[channelId])
+		if groupId and groupId > 0 then
+			groupId = math.floor(groupId)
+			if not membersByGroup[groupId] then
+				membersByGroup[groupId] = {}
+			end
+			membersByGroup[groupId][#membersByGroup[groupId] + 1] = channelId
+		end
+	end
+
+	local anchorByChannel = {}
+	for _, members in pairs(membersByGroup) do
+		local memberSet = {}
+		for i = 1, #members do
+			memberSet[members[i]] = true
+		end
+
+		local relayAnchor = nil
+		for i = 1, #constants.channelList do
+			local candidateId = constants.channelList[i].id
+			if memberSet[candidateId] and canChannelReceiveGroupedChannels(candidateId) then
+				relayAnchor = candidateId
+				break
+			end
+		end
+
+		if relayAnchor then
+			for i = 1, #members do
+				anchorByChannel[members[i]] = relayAnchor
+			end
+		else
+			for i = 1, #members do
+				anchorByChannel[members[i]] = members[i]
+			end
+		end
+	end
+
+	local normalized = {}
+	local groupIdByAnchor = {}
+	local nextGroupId = 0
+	for i = 1, #constants.channelList do
+		local channelId = constants.channelList[i].id
+		local anchorId = anchorByChannel[channelId] or channelId
+		if not groupIdByAnchor[anchorId] then
+			nextGroupId = nextGroupId + 1
+			groupIdByAnchor[anchorId] = nextGroupId
+		end
+		normalized[channelId] = groupIdByAnchor[anchorId]
+	end
+
+	return normalized
 end
 
 local function buildDefaultTabGrouping()
@@ -269,11 +533,11 @@ local function buildDefaultTabGrouping()
 		end
 	end
 
-	return defaults
+	return assignRelayTargetGrouping(defaults)
 end
 
 local function normalizeTabGrouping(rawGrouping)
-	local normalized = {}
+	local provisional = {}
 	local highestGroup = 0
 
 	if type(rawGrouping) == 'table' then
@@ -282,7 +546,7 @@ local function normalizeTabGrouping(rawGrouping)
 			local groupId = tonumber(rawGrouping[channelId])
 			if groupId and groupId > 0 then
 				groupId = math.floor(groupId)
-				normalized[channelId] = groupId
+				provisional[channelId] = groupId
 				if groupId > highestGroup then
 					highestGroup = groupId
 				end
@@ -293,22 +557,206 @@ local function normalizeTabGrouping(rawGrouping)
 	local defaults = buildDefaultTabGrouping()
 	for i = 1, #constants.channelList do
 		local channelId = constants.channelList[i].id
-		if not normalized[channelId] then
+		if not provisional[channelId] then
 			local fallbackGroup = tonumber(defaults[channelId])
 			if fallbackGroup and fallbackGroup > 0 then
 				fallbackGroup = math.floor(fallbackGroup)
-				normalized[channelId] = fallbackGroup
+				provisional[channelId] = fallbackGroup
 				if fallbackGroup > highestGroup then
 					highestGroup = fallbackGroup
 				end
 			else
 				highestGroup = highestGroup + 1
-				normalized[channelId] = highestGroup
+				provisional[channelId] = highestGroup
+			end
+		end
+	end
+
+	return assignRelayTargetGrouping(provisional)
+end
+
+local function normalizeTabGroupOrder(rawOrder)
+	local normalized = {}
+	local nextOrder = 1
+
+	for i = 1, #constants.channelList do
+		local channelId = constants.channelList[i].id
+		local value = type(rawOrder) == 'table' and tonumber(rawOrder[channelId]) or nil
+		if value and value > 0 then
+			normalized[channelId] = math.floor(value)
+		else
+			normalized[channelId] = nextOrder
+		end
+		nextOrder = nextOrder + 1
+	end
+
+	return normalized
+end
+
+local function buildValidTabGroupLookup(grouping)
+	local valid = {}
+	local source = type(grouping) == 'table' and grouping or {}
+
+	for i = 1, #constants.channelList do
+		local channelId = constants.channelList[i].id
+		local groupId = tonumber(source[channelId])
+		if groupId and groupId > 0 then
+			valid[tostring(math.floor(groupId))] = true
+		end
+	end
+
+	return valid
+end
+
+local function normalizeTabGroupNames(rawNames, grouping)
+	local normalized = {}
+	local validGroups = buildValidTabGroupLookup(grouping)
+
+	if type(rawNames) == 'table' then
+		for groupId, label in pairs(rawNames) do
+			local normalizedGroupId = tostring(math.floor(tonumber(groupId) or 0))
+			local normalizedLabel = tostring(label or ''):gsub('^%s+', ''):gsub('%s+$', '')
+			if validGroups[normalizedGroupId] and normalizedLabel ~= '' then
+				normalized[normalizedGroupId] = normalizedLabel:sub(1, 48)
 			end
 		end
 	end
 
 	return normalized
+end
+
+local function normalizeTabGroupDisplayMode(rawModes, grouping)
+	local normalized = {}
+	local validGroups = buildValidTabGroupLookup(grouping)
+
+	if type(rawModes) == 'table' then
+		for groupId, mode in pairs(rawModes) do
+			local normalizedGroupId = tostring(math.floor(tonumber(groupId) or 0))
+			local normalizedMode = tostring(mode or ''):gsub('_', '-'):lower()
+			if normalizedMode == 'foldermerged' then
+				normalizedMode = 'folder-merged'
+			end
+			if validGroups[normalizedGroupId] and (normalizedMode == 'folder' or normalizedMode == 'merged' or normalizedMode == 'folder-merged') then
+				normalized[normalizedGroupId] = normalizedMode
+			end
+		end
+	end
+
+	return normalized
+end
+
+local function getTabGroupingAnchorChannelId(channelId, grouping)
+	local id = Client.normalizeKey(channelId)
+	if not id or not constants.channelById[id] then
+		return nil
+	end
+
+	local source = type(grouping) == 'table' and grouping or State.TabGrouping or buildDefaultTabGrouping()
+	local groupId = tonumber(source[id])
+	if not groupId or groupId <= 0 then
+		return id
+	end
+
+	for i = 1, #constants.channelList do
+		local candidateId = constants.channelList[i].id
+		if tonumber(source[candidateId]) == groupId and canChannelReceiveGroupedChannels(candidateId) then
+			return candidateId
+		end
+	end
+
+	return id
+end
+
+local function isPinnedTab(channelId)
+	local id = Client.normalizeKey(channelId)
+	if not id then
+		return false
+	end
+
+	local pinnedByChannel = type(constants.tabPinnedByChannel) == 'table' and constants.tabPinnedByChannel or {}
+	if pinnedByChannel[id] == nil then
+		return id == 'local' or id == 'global'
+	end
+
+	return pinnedByChannel[id] == true
+end
+
+local function canHideTabButton(channelId, grouping)
+	local id = Client.normalizeKey(channelId)
+	if not id or not constants.channelById[id] then
+		return false
+	end
+
+	if isPinnedTab(id) then
+		return false
+	end
+
+	return getTabGroupingAnchorChannelId(id, grouping) ~= id
+end
+
+local function normalizeHiddenTabButtons(rawHidden, grouping)
+	local normalized = {}
+	if type(rawHidden) ~= 'table' then
+		return normalized
+	end
+
+	for i = 1, #constants.channelList do
+		local channelId = constants.channelList[i].id
+		if rawHidden[channelId] == true and canHideTabButton(channelId, grouping) then
+			normalized[channelId] = true
+		end
+	end
+
+	return normalized
+end
+
+local function ensureActiveChannelVisible()
+	local current = Client.normalizeKey(State.Channel)
+	if not current or State.HiddenTabButtons[current] ~= true then
+		return
+	end
+
+	local fallback = getTabGroupingAnchorChannelId(current, State.TabGrouping)
+	State.Channel = resolveChannelWithFallback(fallback)
+end
+
+local function isWhisperDedicatedTabActive()
+	local whisperChannel = constants.channelById.whispers
+	if constants.whisperChannelEnabled ~= true or not whisperChannel then
+		return false
+	end
+
+	if whisperChannel.visible == false or not Client.canAccessChannel('whispers') then
+		return false
+	end
+
+	if canChannelReceiveGroupedChannels('whispers') then
+		return false
+	end
+
+	return getTabGroupingAnchorChannelId('whispers') == 'whispers'
+end
+
+local function isEmbeddedRadioTabActive()
+	if constants.radioIntegrationEnabled ~= true then
+		return false
+	end
+
+	local radioChannelId = Client.normalizeKey(constants.radioIntegrationChannelId)
+	if not radioChannelId or not constants.channelById[radioChannelId] then
+		return false
+	end
+
+	local radioChannel = constants.channelById[radioChannelId]
+	if radioChannel.visible == false or not Client.canAccessChannel(radioChannelId) then
+		return false
+	end
+
+	if canChannelReceiveGroupedChannels(radioChannelId) then
+		return false
+	end
+
+	return getTabGroupingAnchorChannelId(radioChannelId) == radioChannelId
 end
 
 local function normalizeTabNotificationToggles(rawToggles)
@@ -328,18 +776,487 @@ local function normalizeTabNotificationToggles(rawToggles)
 	return normalized
 end
 
+local function isEmbeddedRadioResourceStarted()
+	if constants.radioIntegrationEnabled ~= true then
+		return false
+	end
+
+	local resourceName = resolveResourceName(constants.radioIntegrationResource or '7-radio')
+	local state = GetResourceState(resourceName)
+	return state == 'started' or state == 'starting'
+end
+
+local function buildDefaultRadioSlot(slotName)
+	return {
+		slot = slotName,
+		frequency = nil,
+		label = '',
+		color = nil,
+		relay = false
+	}
+end
+
+local function buildDefaultEmbeddedRadioState()
+	return {
+		enabled = constants.radioIntegrationEnabled == true,
+		available = false,
+		resource = resolveResourceName(constants.radioIntegrationResource or '7-radio') or tostring(constants.radioIntegrationResource or '7-radio'),
+		channelId = Client.normalizeKey(constants.radioIntegrationChannelId) or 'radio',
+		active = 'primary',
+		relayLocked = false,
+		slots = {
+			primary = buildDefaultRadioSlot('primary'),
+			secondary = buildDefaultRadioSlot('secondary')
+		},
+		historyByFrequency = {}
+	}
+end
+
+local function cloneEmbeddedRadioMessage(entry, fallbackFrequency)
+	if type(entry) ~= 'table' then
+		return nil
+	end
+
+	local frequency = tostring(entry.frequency or fallbackFrequency or ''):gsub('^%s+', ''):gsub('%s+$', '')
+	if frequency == '' then
+		return nil
+	end
+
+	local clientMessageId = tostring(entry.clientMessageId or ''):gsub('^%s+', ''):gsub('%s+$', '')
+	if clientMessageId == '' then
+		clientMessageId = nil
+	end
+
+	local slot = tostring(entry.slot or entry.channel or ''):lower()
+	if slot ~= 'secondary' then
+		slot = 'primary'
+	end
+
+	return {
+		frequency = frequency,
+		sender = tostring(entry.sender or ''),
+		message = tostring(entry.message or ''),
+		senderId = tonumber(entry.senderId) or nil,
+		clientMessageId = clientMessageId,
+		timestamp = tonumber(entry.timestamp) or 0,
+		slot = slot
+	}
+end
+
+local function cloneEmbeddedRadioHistory(rawHistory)
+	local cloned = {}
+	if type(rawHistory) ~= 'table' then
+		return cloned
+	end
+
+	for frequency, entries in pairs(rawHistory) do
+		local freqLabel = tostring(frequency or ''):gsub('^%s+', ''):gsub('%s+$', '')
+		if freqLabel ~= '' then
+			local normalizedEntries = {}
+			if type(entries) == 'table' then
+				for i = 1, #entries do
+					local normalizedEntry = cloneEmbeddedRadioMessage(entries[i], freqLabel)
+					if normalizedEntry then
+						normalizedEntries[#normalizedEntries + 1] = normalizedEntry
+					end
+				end
+			end
+			cloned[freqLabel] = normalizedEntries
+		end
+	end
+
+	return cloned
+end
+
+local function normalizeEmbeddedRadioSlot(slotName, rawSlot, fallbackFrequency, fallbackRelay)
+	local normalized = buildDefaultRadioSlot(slotName)
+	local source = type(rawSlot) == 'table' and rawSlot or {}
+	local frequency = tostring(source.frequency or fallbackFrequency or ''):gsub('^%s+', ''):gsub('%s+$', '')
+
+	if frequency ~= '' then
+		normalized.frequency = frequency
+	end
+
+	normalized.label = tostring(source.label or '')
+	if normalized.label == '' and normalized.frequency then
+		normalized.label = normalized.frequency
+	end
+
+	if source.color ~= nil then
+		normalized.color = tostring(source.color)
+	end
+
+	if source.relay ~= nil then
+		normalized.relay = source.relay == true
+	else
+		normalized.relay = fallbackRelay == true
+	end
+
+	return normalized
+end
+
+local function applyEmbeddedRadioActiveFallback(rawState)
+	if rawState.active == 'primary' and not rawState.slots.primary.frequency and rawState.slots.secondary.frequency then
+		rawState.active = 'secondary'
+	elseif rawState.active == 'secondary' and not rawState.slots.secondary.frequency and rawState.slots.primary.frequency then
+		rawState.active = 'primary'
+	elseif rawState.active ~= 'secondary' then
+		rawState.active = 'primary'
+	end
+end
+
+local function embeddedRadioStateHasFrequency(rawState)
+	if type(rawState) ~= 'table' then
+		return false
+	end
+
+	local slots = type(rawState.slots) == 'table' and rawState.slots or nil
+	local primary = tostring((slots and slots.primary and slots.primary.frequency) or rawState.primary or ''):gsub('^%s+', ''):gsub('%s+$', '')
+	if primary ~= '' then
+		return true
+	end
+
+	local secondary = tostring((slots and slots.secondary and slots.secondary.frequency) or rawState.secondary or ''):gsub('^%s+', ''):gsub('%s+$', '')
+	return secondary ~= ''
+end
+
+local function setEmbeddedRadioState(rawState, includeHistory)
+	local previousState = type(State.RadioIntegration) == 'table' and State.RadioIntegration or buildDefaultEmbeddedRadioState()
+	local normalized = buildDefaultEmbeddedRadioState()
+	local source = type(rawState) == 'table' and rawState or {}
+
+	normalized.enabled = constants.radioIntegrationEnabled == true and source.enabled ~= false
+	normalized.available = source.available == true
+	normalized.active = tostring(source.active or previousState.active or 'primary') == 'secondary' and 'secondary' or 'primary'
+	normalized.relayLocked = source.relayLocked == true
+	normalized.slots.primary = normalizeEmbeddedRadioSlot(
+		'primary',
+		type(source.slots) == 'table' and source.slots.primary or nil,
+		source.primary,
+		source.primaryChatRelay
+	)
+	normalized.slots.secondary = normalizeEmbeddedRadioSlot(
+		'secondary',
+		type(source.slots) == 'table' and source.slots.secondary or nil,
+		source.secondary,
+		source.secondaryChatRelay
+	)
+
+	local historySource = nil
+	if includeHistory == true then
+		if type(source.history) == 'table' then
+			historySource = source.history
+		elseif type(source.historyByFrequency) == 'table' then
+			historySource = source.historyByFrequency
+		end
+	end
+
+	if historySource then
+		normalized.historyByFrequency = cloneEmbeddedRadioHistory(historySource)
+	else
+		normalized.historyByFrequency = cloneEmbeddedRadioHistory(previousState.historyByFrequency)
+	end
+
+	applyEmbeddedRadioActiveFallback(normalized)
+	State.RadioIntegration = normalized
+	return normalized
+end
+
+local function getEmbeddedRadioPayload()
+	local current = type(State.RadioIntegration) == 'table' and State.RadioIntegration or buildDefaultEmbeddedRadioState()
+	return {
+		enabled = current.enabled == true,
+		available = current.available == true,
+		resource = current.resource,
+		channelId = current.channelId,
+		active = current.active,
+		relayLocked = current.relayLocked == true,
+		slots = {
+			primary = normalizeEmbeddedRadioSlot('primary', current.slots and current.slots.primary or nil, nil, nil),
+			secondary = normalizeEmbeddedRadioSlot('secondary', current.slots and current.slots.secondary or nil, nil, nil)
+		},
+		historyByFrequency = cloneEmbeddedRadioHistory(current.historyByFrequency)
+	}
+end
+
+local function syncEmbeddedRadioStateToNui()
+	if State.chatLoaded ~= true then
+		return
+	end
+
+	Client.sendNuiMessage({
+		type = 'setRadioState',
+		state = getEmbeddedRadioPayload()
+	})
+end
+
+local function preserveEmbeddedRadioAvailability(available)
+	local current = getEmbeddedRadioPayload()
+	current.available = available == true
+	return setEmbeddedRadioState(current, true)
+end
+
+local function refreshEmbeddedRadioState()
+	if constants.radioIntegrationEnabled ~= true then
+		return setEmbeddedRadioState({}, false)
+	end
+
+	if not isEmbeddedRadioResourceStarted() then
+		return preserveEmbeddedRadioAvailability(false)
+	end
+
+	local ok, rawState = pcall(function()
+		local resourceName = resolveResourceName(constants.radioIntegrationResource or '7-radio')
+		return exports[resourceName]:GetState()
+	end)
+
+	if not ok or type(rawState) ~= 'table' then
+		return preserveEmbeddedRadioAvailability(false)
+	end
+
+	if rawState.available == nil then
+		rawState.available = true
+	end
+
+	return setEmbeddedRadioState(rawState, true)
+end
+
+local function ensureEmbeddedRadioStateSynced()
+	if constants.radioIntegrationEnabled ~= true then
+		return
+	end
+
+	if embeddedRadioRefreshWorkerRunning then
+		return
+	end
+
+	embeddedRadioRefreshWorkerRunning = true
+
+	CreateThread(function()
+		for _ = 1, embeddedRadioRefreshMaxAttempts do
+			if constants.radioIntegrationEnabled ~= true then
+				break
+			end
+
+			local current = type(State.RadioIntegration) == 'table' and State.RadioIntegration or buildDefaultEmbeddedRadioState()
+			if current.available == true and embeddedRadioStateHasFrequency(current) then
+				break
+			end
+
+			if not isEmbeddedRadioResourceStarted() then
+				break
+			end
+
+			Wait(embeddedRadioRefreshDelayMs)
+
+			local nextState = refreshEmbeddedRadioState()
+			if type(nextState) == 'table' then
+				syncEmbeddedRadioStateToNui()
+				if nextState.available == true and embeddedRadioStateHasFrequency(nextState) then
+					break
+				end
+			end
+		end
+
+		embeddedRadioRefreshWorkerRunning = false
+	end)
+end
+
+local function appendEmbeddedRadioMessage(rawMessage)
+	if type(State.RadioIntegration) ~= 'table' then
+		State.RadioIntegration = buildDefaultEmbeddedRadioState()
+	end
+
+	local normalizedMessage = cloneEmbeddedRadioMessage(rawMessage, rawMessage and rawMessage.frequency or nil)
+	if not normalizedMessage then
+		return nil
+	end
+
+	local historyByFrequency = State.RadioIntegration.historyByFrequency
+	if type(historyByFrequency) ~= 'table' then
+		historyByFrequency = {}
+		State.RadioIntegration.historyByFrequency = historyByFrequency
+	end
+
+	local history = historyByFrequency[normalizedMessage.frequency]
+	if type(history) ~= 'table' then
+		history = {}
+		historyByFrequency[normalizedMessage.frequency] = history
+	end
+
+	if normalizedMessage.clientMessageId then
+		for i = 1, #history do
+			if history[i].clientMessageId == normalizedMessage.clientMessageId then
+				return nil
+			end
+		end
+	end
+
+	history[#history + 1] = normalizedMessage
+	if #history > 500 then
+		local trimmed = {}
+		for i = math.max(1, #history - 499), #history do
+			trimmed[#trimmed + 1] = history[i]
+		end
+		historyByFrequency[normalizedMessage.frequency] = trimmed
+	end
+
+	return normalizedMessage
+end
+
+local function sendEmbeddedRadioMessage(slot, message, explicitFrequency)
+	if constants.radioIntegrationEnabled ~= true then
+		return {
+			ok = false,
+			reason = 'disabled',
+			state = getEmbeddedRadioPayload()
+		}
+	end
+
+	if not isEmbeddedRadioResourceStarted() then
+		preserveEmbeddedRadioAvailability(false)
+		return {
+			ok = false,
+			reason = 'unavailable',
+			state = getEmbeddedRadioPayload()
+		}
+	end
+
+	local currentState = type(State.RadioIntegration) == 'table' and State.RadioIntegration or buildDefaultEmbeddedRadioState()
+	local slotKey = tostring(slot or ''):lower() == 'secondary' and 'secondary' or 'primary'
+	local slotState = currentState.slots and currentState.slots[slotKey] or nil
+	local slotFrequency = slotState and slotState.frequency or nil
+	local frequency = tostring(explicitFrequency or slotFrequency or ''):gsub('^%s+', ''):gsub('%s+$', '')
+	if frequency == '' then
+		frequency = nil
+	end
+
+	local ok, response = pcall(function()
+		local resourceName = resolveResourceName(constants.radioIntegrationResource or '7-radio')
+		return exports[resourceName]:SendMessageFromSlot(slotKey, message, frequency)
+	end)
+
+	if not ok or type(response) ~= 'table' then
+		local nextState = refreshEmbeddedRadioState()
+		if type(nextState) == 'table' and not embeddedRadioStateHasFrequency(nextState) then
+			ensureEmbeddedRadioStateSynced()
+		end
+		return {
+			ok = false,
+			reason = 'export_failed',
+			state = getEmbeddedRadioPayload()
+		}
+	end
+
+	if type(response.state) == 'table' then
+		setEmbeddedRadioState(response.state, true)
+	else
+		local nextState = refreshEmbeddedRadioState()
+		if type(nextState) == 'table' and not embeddedRadioStateHasFrequency(nextState) then
+			ensureEmbeddedRadioStateSynced()
+		end
+	end
+	return {
+		ok = response.success == true,
+		reason = response.reason,
+		clientMessageId = response.clientMessageId,
+		frequency = response.frequency,
+		slot = response.slot,
+		state = getEmbeddedRadioPayload()
+	}
+end
+
+local function getHiddenRadioFallbackChannelId()
+	local radioChannelId = Client.normalizeKey(constants.radioIntegrationChannelId)
+	local candidates = {
+		constants.radioIntegrationFallbackChannelId,
+		constants.defaultChannelId,
+		'local',
+		'global'
+	}
+
+	for i = 1, #candidates do
+		local candidateId = Client.normalizeKey(candidates[i])
+		local channel = candidateId and constants.channelById[candidateId] or nil
+		if candidateId and candidateId ~= radioChannelId and channel and channel.visible ~= false and Client.canAccessChannel(candidateId) then
+			return candidateId
+		end
+	end
+
+	for i = 1, #constants.channelList do
+		local channel = constants.channelList[i]
+		if channel and channel.id ~= radioChannelId and channel.visible ~= false and Client.canAccessChannel(channel.id) then
+			return channel.id
+		end
+	end
+
+	return getFirstAccessibleChannelId()
+end
+
+local function shouldRouteRadioRelayToFallback(rawMessage, resolvedChannelId)
+	if constants.radioIntegrationEnabled ~= true then
+		return false
+	end
+
+	if Client.normalizeKey(resolvedChannelId) ~= Client.normalizeKey(constants.radioIntegrationChannelId) then
+		return false
+	end
+
+	local metadata = type(rawMessage.metadata) == 'table' and rawMessage.metadata or nil
+	if not metadata or tostring(metadata.type or '') ~= 'radioRelay' then
+		return false
+	end
+
+	return not isEmbeddedRadioTabActive()
+end
+
+local function shouldSuppressEmbeddedRadioRelay(normalizedMessage)
+	if constants.radioIntegrationEnabled ~= true or not isEmbeddedRadioTabActive() then
+		return false
+	end
+
+	local radioChannelId = Client.normalizeKey(constants.radioIntegrationChannelId)
+	if not radioChannelId or normalizedMessage.channel ~= radioChannelId then
+		return false
+	end
+
+	local metadata = type(normalizedMessage.metadata) == 'table' and normalizedMessage.metadata or nil
+	if not metadata or tostring(metadata.type or '') ~= 'radioRelay' then
+		return false
+	end
+
+	return normalizeResourceKey(metadata.resource) == normalizeResourceKey(resolveResourceName(constants.radioIntegrationResource or '7-radio'))
+end
+
 local function normalizeMessagePayload(message)
 	local raw = type(message) == 'table' and message or {text = tostring(message or '')}
-	local channelId = Client.normalizeKey(raw.channel)
-
-	if not channelId or not constants.channelById[channelId] then
-		channelId = Client.getActiveCommandContextChannel() or constants.defaultChannelId
+	local channelId = resolveInboundMessageChannel(raw)
+	if shouldRouteRadioRelayToFallback(raw, channelId) then
+		channelId = getHiddenRadioFallbackChannelId()
 	end
 
 	channelId = resolveChannelWithFallback(channelId)
 
 	local channel = getChannel(channelId)
 	local color = Client.normalizeRgbColor(raw.color, channel and channel.color or {255, 255, 255})
+	local metadata = type(raw.metadata) == 'table' and raw.metadata or nil
+
+	local metadataType = metadata and tostring(metadata.type or '') or ''
+	local metadataChannel = metadata and Client.normalizeKey(metadata.channel) or nil
+	if channelId == 'local'
+		and metadata
+		and metadataType == 'chat'
+		and (metadataChannel == nil or metadataChannel == 'local')
+		and type(Client.getVoiceColorForLocalMessage) == 'function' then
+		local distanceColor = Client.getVoiceColorForLocalMessage(
+			metadata.authorSource or metadata.source,
+			metadata.senderDistance or metadata.distance
+		)
+		if distanceColor then
+			color = distanceColor
+		end
+	end
+
 	local label = tostring(raw.label or (channel and channel.label or 'Chat'))
 	local args = type(raw.args) == 'table' and raw.args or nil
 
@@ -353,6 +1270,7 @@ local function normalizeMessagePayload(message)
 	end
 
 	return {
+		messageId = tostring(raw.messageId or (metadata and metadata.messageId) or ''),
 		channel = channelId,
 		label = label,
 		color = color,
@@ -360,7 +1278,8 @@ local function normalizeMessagePayload(message)
 		template = raw.template,
 		templateId = raw.templateId,
 		multiline = raw.multiline ~= false,
-		metadata = type(raw.metadata) == 'table' and raw.metadata or nil
+		metadata = metadata,
+		timestamp = tonumber(raw.timestamp) or os.time()
 	}
 end
 
@@ -514,9 +1433,14 @@ local function loadSavedSettings()
 
 	local tabGroupingSaved = Client.decodeJson(GetResourceKvpString(tabGroupingKvpKey))
 	State.TabGrouping = normalizeTabGrouping(tabGroupingSaved)
+	State.TabGroupOrder = normalizeTabGroupOrder(Client.decodeJson(GetResourceKvpString(tabGroupOrderKvpKey)))
+	State.TabGroupNames = normalizeTabGroupNames(Client.decodeJson(GetResourceKvpString(tabGroupNamesKvpKey)), State.TabGrouping)
+	State.TabGroupDisplayMode = normalizeTabGroupDisplayMode(Client.decodeJson(GetResourceKvpString(tabGroupDisplayModeKvpKey)), State.TabGrouping)
+	State.HiddenTabButtons = normalizeHiddenTabButtons(Client.decodeJson(GetResourceKvpString(hiddenTabButtonsKvpKey)), State.TabGrouping)
 
 	local tabNotificationSaved = Client.decodeJson(GetResourceKvpString(tabNotificationKvpKey))
 	State.TabNotificationToggles = normalizeTabNotificationToggles(tabNotificationSaved)
+	ensureActiveChannelVisible()
 
 	Client.markEmojiDirty()
 end
@@ -550,18 +1474,46 @@ end
 
 local function buildSuggestionListFromCommands()
 	local suggestions = {}
+	local function paramsFor(commandName)
+		local name = Client.normalizeKey(commandName)
+		if name == 'whisper' or name == 'w' or name == 'msg' or name == 'dm' then
+			return {
+				{name = 'player', help = 'Player server ID or name', type = 'player', required = true},
+				{name = 'message', help = 'Message text', type = 'text', required = true}
+			}
+		end
+		if name == 'reply' or name == 'r' then
+			return {{name = 'message', help = 'Reply text', type = 'text', required = true}}
+		end
+		if name == 'report' then
+			return {
+				{name = 'player', help = 'Optional player server ID', type = 'player', required = false},
+				{name = 'reason', help = 'Report reason', type = 'text', required = true}
+			}
+		end
+		if name == 'mute' or name == 'unmute' then
+			return {{name = 'player', help = 'Player server ID or name', type = 'player', required = true}}
+		end
+		if name == 'clearhistory' or name == 'clearhist' then
+			return {{name = 'confirm', help = 'Type confirm to clear saved history', type = 'text', required = false}}
+		end
+		if name == 'global' or name == 'g' or name == 'say' or name == 'me' or name == 'do' or name == 'staff' or name == 'nick' then
+			return {{name = 'message', help = 'Message text', type = 'text', required = true}}
+		end
+		return nil
+	end
 	for _, command in pairs(constants.commandByKey) do
 		if command.enabled == true then
 			suggestions[#suggestions + 1] = {
 				'/' .. command.command,
 				command.help ~= '' and command.help or ('Send a message in ' .. tostring(command.label)),
-				nil
+				paramsFor(command.command)
 			}
 			for i = 1, #command.aliases do
 				suggestions[#suggestions + 1] = {
 					'/' .. command.aliases[i],
 					command.help ~= '' and command.help or ('Alias for /' .. command.command),
-					nil
+					paramsFor(command.aliases[i]) or paramsFor(command.command)
 				}
 			end
 		end
@@ -598,7 +1550,8 @@ local function refreshCommands()
 		if IsAceAllowed(('command.%s'):format(command.name)) then
 			suggestions[#suggestions + 1] = {
 				name = '/' .. command.name,
-				help = ''
+				help = '',
+				params = command.params or command.arguments or {}
 			}
 		end
 	end
@@ -656,6 +1609,53 @@ local function getAllowedChannelsPayload()
 	return channels
 end
 
+local function applyChannelDefinitions(rawChannels)
+	if type(rawChannels) ~= 'table' then
+		return false
+	end
+
+	local list = {}
+	local byId = {}
+	for i = 1, #rawChannels do
+		local raw = type(rawChannels[i]) == 'table' and rawChannels[i] or nil
+		local id = raw and Client.normalizeKey(raw.id)
+		if id then
+			local entry = {
+				id = id,
+				label = tostring(raw.label or id),
+				color = raw.color,
+				order = tonumber(raw.order) or 100,
+				visible = raw.visible ~= false,
+				cycle = raw.cycle ~= false,
+				canSend = raw.canSend ~= false,
+				maxHistory = normalizeLimit(raw.maxHistory or raw.history, 250),
+				scope = Client.normalizeKey(raw.scope) or 'global',
+				distance = tonumber(raw.distance)
+			}
+			list[#list + 1] = entry
+			byId[id] = entry
+		end
+	end
+
+	if #list == 0 then
+		return false
+	end
+
+	table.sort(list, function(a, b)
+		if a.order == b.order then
+			return a.id < b.id
+		end
+		return a.order < b.order
+	end)
+
+	constants.channelList = list
+	constants.channelById = byId
+	if not byId[constants.defaultChannelId] then
+		constants.defaultChannelId = byId.global and 'global' or list[1].id
+	end
+	return true
+end
+
 local function getNotificationProfilesPayload()
 	local defaultProfile = type(constants.notificationDefaultProfile) == 'table' and constants.notificationDefaultProfile or {}
 	local byChannel = type(constants.notificationByChannel) == 'table' and constants.notificationByChannel or {}
@@ -672,14 +1672,80 @@ local function getNotificationProfilesPayload()
 	return defaultProfile, channels
 end
 
-local function setTabGrouping(rawGrouping)
+local function setTabGrouping(rawGrouping, rawOrder)
+	if not ensureContext() then
+		return {grouping = {}, order = {}}
+	end
+
+	State.TabGrouping = normalizeTabGrouping(rawGrouping)
+	State.TabGroupOrder = normalizeTabGroupOrder(rawOrder)
+	State.TabGroupNames = normalizeTabGroupNames(State.TabGroupNames, State.TabGrouping)
+	State.TabGroupDisplayMode = normalizeTabGroupDisplayMode(State.TabGroupDisplayMode, State.TabGrouping)
+	Client.encodeAndStore(tabGroupingKvpKey, State.TabGrouping)
+	Client.encodeAndStore(tabGroupOrderKvpKey, State.TabGroupOrder)
+	Client.encodeAndStore(tabGroupNamesKvpKey, State.TabGroupNames)
+	Client.encodeAndStore(tabGroupDisplayModeKvpKey, State.TabGroupDisplayMode)
+	State.HiddenTabButtons = normalizeHiddenTabButtons(State.HiddenTabButtons, State.TabGrouping)
+	Client.encodeAndStore(hiddenTabButtonsKvpKey, State.HiddenTabButtons)
+	ensureActiveChannelVisible()
+	return {
+		grouping = State.TabGrouping,
+		order = State.TabGroupOrder,
+		groupNames = State.TabGroupNames,
+		groupDisplayMode = State.TabGroupDisplayMode
+	}
+end
+
+local function setTabGroupSettings(rawNames, rawDisplayMode)
+	if not ensureContext() then
+		return {groupNames = {}, groupDisplayMode = {}}
+	end
+
+	State.TabGroupNames = normalizeTabGroupNames(rawNames, State.TabGrouping)
+	State.TabGroupDisplayMode = normalizeTabGroupDisplayMode(rawDisplayMode, State.TabGrouping)
+	Client.encodeAndStore(tabGroupNamesKvpKey, State.TabGroupNames)
+	Client.encodeAndStore(tabGroupDisplayModeKvpKey, State.TabGroupDisplayMode)
+	return {
+		groupNames = State.TabGroupNames,
+		groupDisplayMode = State.TabGroupDisplayMode
+	}
+end
+
+local function setHiddenTabButton(channelId, hidden)
 	if not ensureContext() then
 		return {}
 	end
 
-	State.TabGrouping = normalizeTabGrouping(rawGrouping)
-	Client.encodeAndStore(tabGroupingKvpKey, State.TabGrouping)
-	return State.TabGrouping
+	local normalizedChannelId = Client.normalizeKey(channelId)
+	if not normalizedChannelId or not constants.channelById[normalizedChannelId] then
+		return {}
+	end
+
+	if type(State.HiddenTabButtons) ~= 'table' then
+		State.HiddenTabButtons = {}
+	end
+
+	if hidden == true and canHideTabButton(normalizedChannelId, State.TabGrouping) then
+		State.HiddenTabButtons[normalizedChannelId] = true
+	else
+		State.HiddenTabButtons[normalizedChannelId] = nil
+	end
+
+	State.HiddenTabButtons = normalizeHiddenTabButtons(State.HiddenTabButtons, State.TabGrouping)
+	Client.encodeAndStore(hiddenTabButtonsKvpKey, State.HiddenTabButtons)
+	ensureActiveChannelVisible()
+
+	return State.HiddenTabButtons
+end
+
+local function getHiddenTabButtons()
+	if not ensureContext() then
+		return {}
+	end
+	if type(State.HiddenTabButtons) ~= 'table' then
+		State.HiddenTabButtons = {}
+	end
+	return State.HiddenTabButtons
 end
 
 local function setTabNotificationToggle(channelId, enabled)
@@ -717,6 +1783,9 @@ local function buildOnLoadPayload()
 		return {}
 	end
 
+	refreshEmbeddedRadioState()
+	ensureEmbeddedRadioStateSynced()
+
 	if not constants.channelById[State.Channel] then
 		State.Channel = constants.defaultChannelId
 	end
@@ -733,7 +1802,13 @@ local function buildOnLoadPayload()
 		activeChannel = State.Channel,
 		tabs = {
 			grouping = State.TabGrouping,
-			defaultGrouping = buildDefaultTabGrouping()
+			order = State.TabGroupOrder,
+			groupNames = State.TabGroupNames or {},
+			groupDisplayMode = State.TabGroupDisplayMode or {},
+			defaultGrouping = buildDefaultTabGrouping(),
+			groupRelayTargetByChannel = constants.tabGroupRelayTargetByChannel or {},
+			pinnedByChannel = constants.tabPinnedByChannel or {},
+			hidden = getHiddenTabButtons()
 		},
 		notifications = {
 			default = notificationDefaultProfile,
@@ -744,22 +1819,28 @@ local function buildOnLoadPayload()
 			maxConversations = normalizeLimit(config.whispers.maxConversations, 30),
 			maxMessagesPerConversation = normalizeLimit(config.whispers.maxMessagesPerConversation, 80),
 			defaultConversationMode = tostring(config.whispers.defaultConversationMode or 'active-only'),
-			separateWhisperTab = constants.whisperTabEnabled == true,
+			channelEnabled = constants.whisperChannelEnabled == true,
+			separateWhisperTab = isWhisperDedicatedTabActive(),
 			fallbackChannel = constants.whisperFallbackChannelId or constants.defaultChannelId,
+			playerListEnabled = constants.whisperPlayerListEnabled == true,
 			notifications = {
 				enabled = State.whisperSoundEnabled == true,
 				allowToggle = State.whisperSoundToggleAllowed == true,
 				volume = tonumber(constants.whisperNotificationVolume) or 0.65
 			},
 			sidebar = {
+				enabled = true,
 				collapsible = constants.whisperSidebarCollapsible == true,
-				defaultCollapsed = constants.whisperSidebarDefaultCollapsed == true
+				defaultCollapsed = constants.whisperSidebarDefaultCollapsed == true,
+				showPlayerMeta = constants.whisperSidebarShowPlayerMeta ~= false
 			}
 		},
 		emoji = {},
 		emojiPanel = Client.getEmojiPanelData(),
 		distance = State.distanceState,
 		features = Client.getFeatureStatePayload(),
+		radio = getEmbeddedRadioPayload(),
+		permissions = State.Permissions,
 		ui = {
 			fadeTimeout = tonumber(config.ui.fadeTimeout) or 7000,
 			suggestionLimit = math.max(1, tonumber(config.ui.suggestionLimit) or 5),
@@ -767,9 +1848,17 @@ local function buildOnLoadPayload()
 			separateChannelTabs = constants.separateChannelTabs ~= false,
 			singleChannelId = constants.singleChannelId or constants.defaultChannelId,
 			autoScrollDefault = State.autoScrollEnabled == true,
+			opacity = tonumber(GetResourceKvpString('poodlechat:uiOpacity')) or 88,
+			fontFamily = tostring(GetResourceKvpString('poodlechat:fontFamily:v1') or 'inter'),
+			fontScale = tonumber(GetResourceKvpString('poodlechat:fontScale:v1')) or 1.0,
 			templates = config.ui.templates or {},
 			defaultTemplateId = tostring(config.ui.defaultTemplateId or 'default'),
 			defaultAltTemplateId = tostring(config.ui.defaultAltTemplateId or 'defaultAlt'),
+			theme = type(config.ui.theme) == 'table' and config.ui.theme or {},
+			messages = type(config.ui.messages) == 'table' and config.ui.messages or {},
+			contextMenu = type(config.ui.contextMenu) == 'table' and config.ui.contextMenu or {},
+			colorPicker = type(config.ui.colorPicker) == 'table' and config.ui.colorPicker or {},
+			animations = type(config.ui.animations) == 'table' and config.ui.animations or {},
 			runtime = {
 				emojiRenderBatchSize = tonumber(((config.runtime or {}).ui or {}).emojiRenderBatchSize) or 260,
 				emojiSearchDebounceMs = tonumber(((config.runtime or {}).ui or {}).emojiSearchDebounceMs) or 80,
@@ -800,17 +1889,14 @@ end
 
 local function addEnvelopeToChat(message)
 	local normalized = normalizeMessagePayload(message)
+	if shouldSuppressEmbeddedRadioRelay(normalized) then
+		return
+	end
+
 	local metadata = normalized.metadata or {}
 	local license = metadata.license or message.license
 	if isMutedLicense(license) then
 		return
-	end
-
-	if normalized.channel == 'local' and metadata.type == 'chat' then
-		local rangeColor = getVoiceColorForSource(metadata.source)
-		if rangeColor then
-			normalized.color = rangeColor
-		end
 	end
 
 	if metadata.source and State.DisplayMessagesAbovePlayers then
@@ -844,6 +1930,11 @@ local function executeClientCommand(commandKey, commandName, args)
 		return
 	end
 
+	if handler == 'scene' then
+		TriggerServerEvent('poodlechat:sceneMessage', message)
+		return
+	end
+
 	if handler == 'whisper' then
 		local id = args[1]
 		if not id then
@@ -854,7 +1945,7 @@ local function executeClientCommand(commandKey, commandName, args)
 		table.remove(args, 1)
 		TriggerServerEvent('poodlechat:whisperMessage', id, table.concat(args, ' '))
 
-		if constants.whisperTabEnabled == true then
+		if isWhisperDedicatedTabActive() then
 			Client.SetChannel('whispers')
 			Client.sendNuiMessage({
 				type = 'setChannel',
@@ -867,7 +1958,7 @@ local function executeClientCommand(commandKey, commandName, args)
 	if handler == 'reply' then
 		if State.ReplyTo then
 			TriggerServerEvent('poodlechat:whisperMessage', State.ReplyTo, message)
-			if constants.whisperTabEnabled == true then
+			if isWhisperDedicatedTabActive() then
 				Client.SetChannel('whispers')
 				Client.sendNuiMessage({
 					type = 'setChannel',
@@ -882,6 +1973,30 @@ local function executeClientCommand(commandKey, commandName, args)
 
 	if handler == 'clear' then
 		TriggerEvent('chat:clear')
+		return
+	end
+
+	if handler == 'clearhistory' then
+		local now = GetGameTimer()
+		local confirm = Client.normalizeKey(args[1]) == 'confirm'
+		if confirm and clearHistoryConfirmUntil > now then
+			clearHistoryConfirmUntil = 0
+			TriggerServerEvent('poodlechat:clearHistory')
+			return
+		end
+
+		clearHistoryConfirmUntil = now + 30000
+		local suffix = confirm and 'Confirmation expired. ' or ''
+		sendChannelMessage({
+			channel = constants.defaultChannelId,
+			label = 'SYSTEM',
+			color = {255, 211, 101},
+			args = {'System', suffix .. 'Run /clearhistory confirm within 30 seconds to permanently clear your saved and session chat history.'},
+			metadata = {
+				type = 'system',
+				subtype = 'clearHistoryConfirm'
+			}
+		})
 		return
 	end
 
@@ -914,6 +2029,12 @@ local function executeClientCommand(commandKey, commandName, args)
 
 	if handler == 'togglechat' then
 		State.HideChat = not State.HideChat
+
+		Client.sendNuiMessage({
+			type = 'setChatHidden',
+			hidden = State.HideChat
+		})
+
 		return
 	end
 
@@ -925,13 +2046,30 @@ local function executeClientCommand(commandKey, commandName, args)
 	end
 
 	if handler == 'report' then
-		if #args < 2 then
-			sendSimpleError('You must specify a player and a reason')
+		if State.Permissions
+			and State.Permissions.moderation
+			and State.Permissions.moderation.builtInReportsEnabled ~= true
+		then
+			sendSimpleError('The built-in report flow is disabled')
 			return
 		end
-		local player = table.remove(args, 1)
+
+		local player = ''
 		local reason = table.concat(args, ' ')
-		TriggerServerEvent('poodlechat:report', player, reason)
+		if #args > 0 then
+			local candidate = tostring(args[1] or '')
+			if candidate:match('^%d+$') then
+				player = candidate
+				table.remove(args, 1)
+				reason = table.concat(args, ' ')
+			end
+		end
+		Client.sendNuiMessage({
+			type = 'openReportModal',
+			targetId = tostring(player),
+			targetName = tostring(player),
+			reason = reason
+		})
 		return
 	end
 
@@ -963,9 +2101,11 @@ local function registerConfiguredCommands()
 	local supportedHandlers = {
 		global = true,
 		action = true,
+		scene = true,
 		whisper = true,
 		reply = true,
 		clear = true,
+		clearhistory = true,
 		toggleoverhead = true,
 		toggletyping = true,
 		togglebubbles = true,
@@ -1008,6 +2148,7 @@ local function registerChatHandlers()
 	end
 
 	registerConfiguredCommands()
+	refreshEmbeddedRadioState()
 
 	AddEventHandler('poodlechat:channelMessage', function(message)
 		addEnvelopeToChat(message)
@@ -1026,6 +2167,8 @@ local function registerChatHandlers()
 			metadata = {
 				type = 'chat',
 				source = id,
+				authorSource = id,
+				authorName = name,
 				license = license
 			}
 		})
@@ -1046,6 +2189,8 @@ local function registerChatHandlers()
 				metadata = {
 					type = 'chat',
 					source = id,
+					authorSource = id,
+					authorName = name,
 					license = license
 				}
 			})
@@ -1063,9 +2208,33 @@ local function registerChatHandlers()
 				label = 'ME',
 				color = State.ActionMessageColor,
 				args = {'* ' .. name, message},
+			metadata = {
+				type = 'action',
+				source = id,
+				authorSource = id,
+				authorName = name,
+				license = license
+			}
+		})
+		end
+	end)
+
+	AddEventHandler('poodlechat:scene', function(id, license, name, message)
+		if isMutedLicense(license) then
+			return
+		end
+
+		if Client.isInProximity(id, State.SceneMessageDistance or State.ActionMessageDistance) then
+			addEnvelopeToChat({
+				channel = 'local',
+				label = 'DO',
+				color = State.SceneMessageColor or State.ActionMessageColor,
+				args = {'DO', message},
 				metadata = {
-					type = 'action',
+					type = 'scene',
 					source = id,
+					authorSource = id,
+					authorName = name,
 					license = license
 				}
 			})
@@ -1089,6 +2258,8 @@ local function registerChatHandlers()
 				conversationId = tostring(license or ('id:' .. tostring(id))),
 				peerId = id,
 				peerName = name,
+				authorSource = GetPlayerServerId(PlayerId()),
+				authorName = GetPlayerName(PlayerId()),
 				license = license,
 				source = GetPlayerServerId(PlayerId())
 			}
@@ -1111,6 +2282,8 @@ local function registerChatHandlers()
 				conversationId = tostring(license or ('id:' .. tostring(id))),
 				peerId = id,
 				peerName = name,
+				authorSource = id,
+				authorName = name,
 				license = license,
 				source = id
 			}
@@ -1140,9 +2313,79 @@ local function registerChatHandlers()
 			args = {'[' .. (getChannel('staff') and getChannel('staff').label or 'Staff') .. '] ' .. name, message},
 			metadata = {
 				type = 'chat',
-				source = id
+				source = id,
+				authorSource = id,
+				authorName = name
 			}
 		})
+	end)
+
+	AddEventHandler('7_radio:client:stateChanged', function(payload)
+		if constants.radioIntegrationEnabled ~= true then
+			return
+		end
+
+		local nextState = nil
+		if isEmbeddedRadioResourceStarted() then
+			nextState = refreshEmbeddedRadioState()
+			if (type(nextState) ~= 'table' or not embeddedRadioStateHasFrequency(nextState)) and embeddedRadioStateHasFrequency(payload) then
+				nextState = setEmbeddedRadioState(payload or {}, true)
+			end
+		else
+			nextState = setEmbeddedRadioState(payload or {}, true)
+		end
+
+		if type(nextState) == 'table' then
+			syncEmbeddedRadioStateToNui()
+			if nextState.available ~= true or not embeddedRadioStateHasFrequency(nextState) then
+				ensureEmbeddedRadioStateSynced()
+			end
+		end
+	end)
+
+	AddEventHandler('7_radio:client:messageReceived', function(payload)
+		if constants.radioIntegrationEnabled ~= true then
+			return
+		end
+
+		local normalizedMessage = appendEmbeddedRadioMessage(payload)
+		if not normalizedMessage then
+			return
+		end
+
+		if State.chatLoaded == true then
+			Client.sendNuiMessage({
+				type = 'radioMessage',
+				message = normalizedMessage
+			})
+		end
+	end)
+
+	AddEventHandler('onClientResourceStart', function(resourceName)
+		if constants.radioIntegrationEnabled ~= true then
+			return
+		end
+
+		if normalizeResourceKey(resourceName) ~= normalizeResourceKey(resolveResourceName(constants.radioIntegrationResource or '7-radio')) then
+			return
+		end
+
+		refreshEmbeddedRadioState()
+		syncEmbeddedRadioStateToNui()
+		ensureEmbeddedRadioStateSynced()
+	end)
+
+	AddEventHandler('onClientResourceStop', function(resourceName)
+		if constants.radioIntegrationEnabled ~= true then
+			return
+		end
+
+		if normalizeResourceKey(resourceName) ~= normalizeResourceKey(resolveResourceName(constants.radioIntegrationResource or '7-radio')) then
+			return
+		end
+
+		preserveEmbeddedRadioAvailability(false)
+		syncEmbeddedRadioStateToNui()
 	end)
 
 	AddEventHandler('poodlechat:setPermissions', function(permissions)
@@ -1154,6 +2397,11 @@ local function registerChatHandlers()
 			permissions.channels = {}
 		end
 
+		if type(permissions.moderation) ~= 'table' then
+			permissions.moderation = {}
+		end
+
+		applyChannelDefinitions(permissions.channelDefinitions)
 		State.Permissions = permissions
 		if not Client.canAccessChannel(State.Channel) then
 			State.Channel = constants.defaultChannelId
@@ -1240,6 +2488,22 @@ local function registerChatHandlers()
 		return true, resolved
 	end)
 
+	exports('GetEmbeddedRadioIntegration', function()
+		if not ensureContext() then
+			return {
+				enabled = false,
+				resource = '7-radio',
+				channelId = 'radio'
+			}
+		end
+
+		return {
+			enabled = isEmbeddedRadioTabActive(),
+			resource = resolveResourceName(constants.radioIntegrationResource or '7-radio') or tostring(constants.radioIntegrationResource or '7-radio'),
+			channelId = Client.normalizeKey(constants.radioIntegrationChannelId) or 'radio'
+		}
+	end)
+
 	handlersRegistered = true
 end
 
@@ -1255,6 +2519,13 @@ Client.refreshCommands = refreshCommands
 Client.refreshThemes = refreshThemes
 Client.buildOnLoadPayload = buildOnLoadPayload
 Client.setTabGrouping = setTabGrouping
+Client.setTabGroupSettings = setTabGroupSettings
+Client.setHiddenTabButton = setHiddenTabButton
+Client.getHiddenTabButtons = getHiddenTabButtons
 Client.setTabNotificationToggle = setTabNotificationToggle
 Client.getTabNotificationToggles = getTabNotificationToggles
+Client.getEmbeddedRadioPayload = getEmbeddedRadioPayload
+Client.refreshEmbeddedRadioState = refreshEmbeddedRadioState
+Client.ensureEmbeddedRadioStateSynced = ensureEmbeddedRadioStateSynced
+Client.sendEmbeddedRadioMessage = sendEmbeddedRadioMessage
 Client.registerChatHandlers = registerChatHandlers

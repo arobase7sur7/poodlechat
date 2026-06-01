@@ -8,25 +8,14 @@ repository "https://github.com/arobase7sur7/poodlechat"
 
 files {
 	"html/index.html",
-	"html/index.css",
 	"html/emojibase.json",
-	"html/app.js",
-	"html/js/core.js",
-	"html/js/emoji.js",
-	"html/js/widgets.js",
-	"html/js/ui_runtime.js",
-	"html/Message.js",
-	"html/Suggestions.js",
-	"html/vendor/vue.2.3.3.min.js",
-	"html/vendor/flexboxgrid.6.3.1.min.css",
-	"html/vendor/animate.3.5.2.min.css",
-	"html/vendor/latofonts.css",
-	"html/vendor/fonts/LatoRegular.woff2",
-	"html/vendor/fonts/LatoRegular2.woff2",
-	"html/vendor/fonts/LatoLight2.woff2",
-	"html/vendor/fonts/LatoLight.woff2",
-	"html/vendor/fonts/LatoBold.woff2",
-	"html/vendor/fonts/LatoBold2.woff2",
+	"html/assets/app.js",
+	"html/assets/app.css",
+	"html/vendor/interfonts.css",
+	"html/vendor/fonts/InterRegular.woff2",
+	"html/vendor/fonts/InterMedium.woff2",
+	"html/vendor/fonts/InterSemiBold.woff2",
+	"html/vendor/fonts/InterBold.woff2",
 }
 
 ui_page "html/index.html"
@@ -47,8 +36,14 @@ client_scripts {
 
 server_scripts {
 	"server/modules/bootstrap.lua",
+	"server/modules/config_runtime.lua",
+	"server/modules/permissions.lua",
+	"server/modules/audit.lua",
 	"server/modules/emoji.lua",
+	"server/modules/commands.lua",
 	"server/modules/chat.lua",
 	"server/modules/moderation.lua",
+	"server/modules/automessages.lua",
+	"server/modules/manager.lua",
 	"server/server.lua"
 }
